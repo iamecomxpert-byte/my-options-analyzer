@@ -109,7 +109,7 @@ if fetch_btn:
         hist = stock_obj.history(period="100d")
         
         if hist.empty or 'Close' not in hist.columns:
-            st.error(f"❌ No valid history found for {ticker_input}. The symbol may be incorrect or delisted.")
+            st.error(f"❌ No valid history found for {ticker_input}. Symbol may be incorrect.")
             st.session_state.price = None
         else:
             st.session_state.hist_data = hist
@@ -117,7 +117,6 @@ if fetch_btn:
             st.session_state.stock_name = stock_obj.info.get('longName', ticker_input)
             st.session_state.expiries = list(stock_obj.options)
             
-            # Calculate Summary Metrics
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
             st.session_state.pct_change = ((st.session_state.price / hist['Close'].iloc[-20]) - 1) * 100
@@ -179,42 +178,31 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
-with t_tech:
+    with t_tech:
         if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
-            # 1. RUN THE CALCULATIONS AND SAVE TO A LOCAL VARIABLE
-            # We pass a copy to get_technicals, and it returns the updated rows, 
-            # but we need the FULL dataframe for the chart.
             df_tech = st.session_state.hist_data.copy()
-            
-            # Re-run calculations on the local df_tech so the columns exist for the chart
-            # We call the engine but use the dataframe it modifies
-            curr, prev = get_technicals(df_tech) 
+            curr, prev = get_technicals(df_tech)
             
             st.subheader("Momentum & Volatility Health")
             c1, c2, c3 = st.columns(3)
             
-            # EMA CROSS
             ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
             c1.metric("8/20 EMA Status", ema_status, f"{curr['ema8'] - curr['ema20']:.2f} delta")
             if curr['ema8'] > curr['ema20'] and prev['ema8'] <= prev['ema20']:
                 c1.success("🔥 JUST CROSSED BULLISH")
             
-            # MACD
             macd_dir = "Improving" if curr['hist'] > prev['hist'] else "Fading"
             c2.metric("MACD Momentum", macd_dir, f"{curr['hist']:.3f} hist")
             if curr['macd'] > 0: c2.caption("Trend Battery: Positive")
             
-            # BOLLINGER
             pos = "Upper Half" if S > curr['sma20'] else "Lower Half"
             c3.metric("Bollinger Position", pos, f"{((S - curr['lower'])/(curr['upper'] - curr['lower']))*100:.1f}% Band")
             if S > curr['upper']: c3.warning("⚠️ OVEREXTENDED (Above Upper Band)")
 
             st.divider()
-            # 2. USE THE UPDATED LOCAL DATAFRAME FOR THE CHART
-            # This ensures 'ema8', 'ema20', etc. actually exist in the index
             st.line_chart(df_tech[['Close', 'ema8', 'ema20', 'upper', 'lower']])
         else:
-            st.warning("⚠️ Historical technical data is unavailable for this ticker.")
+            st.warning("⚠️ Technical data unavailable.")
 
     with t_ai:
         c1, c2 = st.columns([4, 1])
