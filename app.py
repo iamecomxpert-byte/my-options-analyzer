@@ -179,10 +179,17 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
-    with t_tech:
+with t_tech:
         if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
-            # Using copy() to prevent SettingWithCopyWarning
-            curr, prev = get_technicals(st.session_state.hist_data.copy())
+            # 1. RUN THE CALCULATIONS AND SAVE TO A LOCAL VARIABLE
+            # We pass a copy to get_technicals, and it returns the updated rows, 
+            # but we need the FULL dataframe for the chart.
+            df_tech = st.session_state.hist_data.copy()
+            
+            # Re-run calculations on the local df_tech so the columns exist for the chart
+            # We call the engine but use the dataframe it modifies
+            curr, prev = get_technicals(df_tech) 
+            
             st.subheader("Momentum & Volatility Health")
             c1, c2, c3 = st.columns(3)
             
@@ -203,7 +210,9 @@ if st.session_state.price and st.session_state.expiries:
             if S > curr['upper']: c3.warning("⚠️ OVEREXTENDED (Above Upper Band)")
 
             st.divider()
-            st.line_chart(st.session_state.hist_data[['Close', 'ema8', 'ema20', 'upper', 'lower']])
+            # 2. USE THE UPDATED LOCAL DATAFRAME FOR THE CHART
+            # This ensures 'ema8', 'ema20', etc. actually exist in the index
+            st.line_chart(df_tech[['Close', 'ema8', 'ema20', 'upper', 'lower']])
         else:
             st.warning("⚠️ Historical technical data is unavailable for this ticker.")
 
