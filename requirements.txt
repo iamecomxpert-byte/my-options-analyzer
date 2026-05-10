@@ -4,4 +4,4 @@ pandas
 numpy
 scipy
 requests
-google-genai
+google-genai>=1.55.0
