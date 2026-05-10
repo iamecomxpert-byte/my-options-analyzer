@@ -1,33 +1,36 @@
 import streamlit as st
+import yfinance as yf
 import requests
 import pandas as pd
 from datetime import datetime
 import numpy as np
 
 # Page Config
-st.set_page_config(page_title="Alpha Options Pro", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Hybrid Options Analyst", layout="wide", page_icon="🎯")
 
-# --- DATA FETCHING (ALPHA VANTAGE API) ---
-@st.cache_data(ttl=3600) # Cache for 1 hour to save your 25 daily requests
-def get_options_data(ticker, api_key):
-    # Function 2026: HISTORICAL_OPTIONS provides the full chain
-    url = f'https://www.alphavantage.co/query?function=HISTORICAL_OPTIONS&symbol={ticker}&apikey={api_key}'
+# --- DATA FETCHING (ALPHA VANTAGE FOR PRICE) ---
+@st.cache_data(ttl=300)
+def get_api_price(ticker, api_key):
+    url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}'
     try:
-        response = requests.get(url)
-        data = response.json()
-        
-        if "data" not in data:
-            return None, "API Error: Check if ticker is valid or key is correct."
-        
-        df = pd.DataFrame(data['data'])
-        # Convert numeric columns
-        cols = ['strike', 'bid', 'ask', 'underlying_price', 'implied_volatility']
-        for col in cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        return df, None
-    except Exception as e:
-        return None, str(e)
+        r = requests.get(url)
+        data = r.json()
+        if "Global Quote" in data and "05. price" in data["Global Quote"]:
+            return float(data["Global Quote"]["05. price"]), None
+        return None, "API Limit/Ticker Error"
+    except:
+        return None, "Connection Error"
+
+# --- DATA FETCHING (YFINANCE FOR OPTIONS) ---
+@st.cache_data(ttl=600)
+def get_options_data(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        # Using a simple data pull to verify the ticker works
+        expiries = stock.options
+        return stock, expiries
+    except:
+        return None, None
 
 # --- SIDEBAR: RISK MANAGEMENT ---
 with st.sidebar:
@@ -38,65 +41,56 @@ with st.sidebar:
     st.info(f"Max Loss Allowed: **${risk_dollars:.2f}**")
 
 # --- MAIN APP ---
-st.title("🎯 Alpha Options Analyst")
+st.title("🎯 Hybrid Options Analyst")
 
-# Pull key from Streamlit Secrets
-try:
-    api_key = st.secrets["ALPHA_VANTAGE_KEY"]
-except:
-    st.error("API Key not found in Secrets. Please add ALPHA_VANTAGE_KEY to your Streamlit settings.")
+# Pull key from Secrets
+api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
+if not api_key:
+    st.error("Please add ALPHA_VANTAGE_KEY to your Streamlit Secrets.")
     st.stop()
 
 ticker = st.text_input("Enter Ticker:", "SHOP").upper()
 
 if ticker:
-    df, error = get_options_data(ticker, api_key)
+    # 1. Fetch Data
+    price, p_error = get_api_price(ticker, api_key)
+    stock_obj, expiries = get_options_data(ticker)
     
-    if error:
-        st.error(error)
+    if p_error or not price:
+        st.error(f"Price Error: {p_error}. Try again in 1 minute.")
+    elif not expiries:
+        st.warning("Options data currently unavailable for this ticker.")
     else:
-        # 1. Get Current Context
-        current_price = df.iloc[0]['underlying_price']
-        st.metric(f"{ticker} Current Price", f"${current_price:.2f}")
-
-        # 2. Filter for upcoming Monthly Expiry (e.g., 30-45 days out)
-        df['expiration'] = pd.to_datetime(df['expiration'])
-        expiries = sorted(df['expiration'].unique())
-        # Pick an expiry at least 30 days out
-        target_date = datetime.now() + pd.Timedelta(days=30)
-        selected_expiry = next((d for d in expiries if d > target_date), expiries[-1])
+        st.metric(f"{ticker} Current Price", f"${price:.2f}")
         
-        expiry_str = selected_expiry.strftime('%Y-%m-%d')
-        st.write(f"Analyzing Expiry: **{expiry_str}**")
-        
-        # Filter chain for selected expiry and Calls
-        chain = df[(df['expiration'] == selected_expiry) & (df['type'] == 'call')]
+        expiry = st.selectbox("Select Expiry:", expiries, index=min(2, len(expiries)-1))
+        chain = stock_obj.option_chain(expiry).calls
 
-        # 3. Strategy Logic
-        # Conservative: Strike ~3% below current price
-        cons_chain = chain[chain['strike'] < current_price * 0.97]
-        cons_call = cons_chain.iloc[-1] if not cons_chain.empty else chain.iloc[0]
+        # Strategy Logic: Conservative (ITM) vs Aggressive (OTM)
+        itm_options = chain[chain['strike'] < price * 0.98]
+        cons_call = itm_options.iloc[-1] if not itm_options.empty else chain.iloc[0]
 
-        # Aggressive: Strike ~5% above current price
-        aggr_chain = chain[chain['strike'] > current_price * 1.05]
-        aggr_call = aggr_chain.iloc[0] if not aggr_chain.empty else chain.iloc[-1]
+        otm_options = chain[chain['strike'] > price * 1.05]
+        aggr_call = otm_options.iloc[0] if not otm_options.empty else chain.iloc[-1]
 
         col1, col2 = st.columns(2)
 
         def display_box(title, contract, risk_amt):
             mid = (contract['bid'] + contract['ask']) / 2
+            if np.isnan(mid) or mid <= 0: mid = contract['lastPrice']
+            
             cost = mid * 100
-            # Sizing based on 50% stop-loss
+            # Sizing based on a 50% stop-loss threshold
             max_lots = int(risk_amt / (cost * 0.5)) if cost > 0 else 0
 
             st.markdown(f"### {title}")
             st.write(f"**Strike:** ${contract['strike']}")
-            st.success(f"**Target Buy:** ${mid:.2f}")
+            st.success(f"**Target Buy Price:** ${mid:.2f}")
             
             if max_lots > 0:
-                st.metric("Size", f"{max_lots} Lots", f"Total: ${max_lots*cost:.2f}")
+                st.metric("Recommended Size", f"{max_lots} Lot(s)", f"Total Cost: ${max_lots*cost:.2f}")
             else:
-                st.error("Too expensive for risk profile.")
+                st.error(f"Budget too small. 1 lot risks ${(cost*0.5):.2f}.")
             
             st.write(f"🔴 Stop Loss: **${mid * 0.5:.2f}**")
             st.write(f"🟢 Take Profit: **${mid * 2.0:.2f}**")
@@ -104,15 +98,15 @@ if ticker:
         with col1: display_box("🛡️ Conservative", cons_call, risk_dollars)
         with col2: display_box("⚡ Aggressive", aggr_call, risk_dollars)
 
-        # 4. Probability Check
+        # 4. Market Probability (Expected Move)
         st.divider()
-        iv = aggr_call['implied_volatility']
-        days = (selected_expiry - datetime.now()).days
-        exp_move = current_price * iv * np.sqrt(max(days, 1) / 365)
+        iv = aggr_call['impliedVolatility']
+        days = (datetime.strptime(expiry, '%Y-%m-%d') - datetime.now()).days
+        exp_move = price * iv * np.sqrt(max(days, 1) / 365)
         
-        st.subheader("📊 Market Probability")
-        st.write(f"Market expected move: **±${exp_move:.2f}**")
-        if (aggr_call['strike'] - current_price) < exp_move:
-            st.success("✅ Strike is within expected move.")
+        st.subheader("📊 Market Probability Check")
+        st.write(f"Expected Move: **±${exp_move:.2f}**")
+        if (aggr_call['strike'] - price) < exp_move:
+            st.success("✅ Strike is within expected move. High statistical probability.")
         else:
-            st.error("⚠️ Strike is outside expected move.")
+            st.error("⚠️ Strike is outside expected move. Low statistical probability.")
