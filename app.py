@@ -21,16 +21,23 @@ def get_api_price(ticker, api_key):
     except:
         return None, "Connection Error"
 
-# --- DATA FETCHING (YFINANCE FOR OPTIONS) ---
+# --- DATA FETCHING (YFINANCE FOR OPTIONS - CACHING RAW DATA ONLY) ---
 @st.cache_data(ttl=600)
-def get_options_data(ticker):
+def get_expiries(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # Using a simple data pull to verify the ticker works
-        expiries = stock.options
-        return stock, expiries
+        return list(stock.options) # Returns a simple list
     except:
-        return None, None
+        return []
+
+@st.cache_data(ttl=600)
+def get_call_chain(ticker, expiry):
+    try:
+        stock = yf.Ticker(ticker)
+        chain = stock.option_chain(expiry).calls
+        return chain # Returns a simple pandas DataFrame
+    except:
+        return pd.DataFrame()
 
 # --- SIDEBAR: RISK MANAGEMENT ---
 with st.sidebar:
@@ -43,7 +50,6 @@ with st.sidebar:
 # --- MAIN APP ---
 st.title("🎯 Hybrid Options Analyst")
 
-# Pull key from Secrets
 api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
 if not api_key:
     st.error("Please add ALPHA_VANTAGE_KEY to your Streamlit Secrets.")
@@ -52,9 +58,11 @@ if not api_key:
 ticker = st.text_input("Enter Ticker:", "SHOP").upper()
 
 if ticker:
-    # 1. Fetch Data
+    # 1. Fetch Price
     price, p_error = get_api_price(ticker, api_key)
-    stock_obj, expiries = get_options_data(ticker)
+    
+    # 2. Fetch Expiries
+    expiries = get_expiries(ticker)
     
     if p_error or not price:
         st.error(f"Price Error: {p_error}. Try again in 1 minute.")
@@ -64,49 +72,54 @@ if ticker:
         st.metric(f"{ticker} Current Price", f"${price:.2f}")
         
         expiry = st.selectbox("Select Expiry:", expiries, index=min(2, len(expiries)-1))
-        chain = stock_obj.option_chain(expiry).calls
-
-        # Strategy Logic: Conservative (ITM) vs Aggressive (OTM)
-        itm_options = chain[chain['strike'] < price * 0.98]
-        cons_call = itm_options.iloc[-1] if not itm_options.empty else chain.iloc[0]
-
-        otm_options = chain[chain['strike'] > price * 1.05]
-        aggr_call = otm_options.iloc[0] if not otm_options.empty else chain.iloc[-1]
-
-        col1, col2 = st.columns(2)
-
-        def display_box(title, contract, risk_amt):
-            mid = (contract['bid'] + contract['ask']) / 2
-            if np.isnan(mid) or mid <= 0: mid = contract['lastPrice']
-            
-            cost = mid * 100
-            # Sizing based on a 50% stop-loss threshold
-            max_lots = int(risk_amt / (cost * 0.5)) if cost > 0 else 0
-
-            st.markdown(f"### {title}")
-            st.write(f"**Strike:** ${contract['strike']}")
-            st.success(f"**Target Buy Price:** ${mid:.2f}")
-            
-            if max_lots > 0:
-                st.metric("Recommended Size", f"{max_lots} Lot(s)", f"Total Cost: ${max_lots*cost:.2f}")
-            else:
-                st.error(f"Budget too small. 1 lot risks ${(cost*0.5):.2f}.")
-            
-            st.write(f"🔴 Stop Loss: **${mid * 0.5:.2f}**")
-            st.write(f"🟢 Take Profit: **${mid * 2.0:.2f}**")
-
-        with col1: display_box("🛡️ Conservative", cons_call, risk_dollars)
-        with col2: display_box("⚡ Aggressive", aggr_call, risk_dollars)
-
-        # 4. Market Probability (Expected Move)
-        st.divider()
-        iv = aggr_call['impliedVolatility']
-        days = (datetime.strptime(expiry, '%Y-%m-%d') - datetime.now()).days
-        exp_move = price * iv * np.sqrt(max(days, 1) / 365)
         
-        st.subheader("📊 Market Probability Check")
-        st.write(f"Expected Move: **±${exp_move:.2f}**")
-        if (aggr_call['strike'] - price) < exp_move:
-            st.success("✅ Strike is within expected move. High statistical probability.")
+        # 3. Fetch Calls for selected Expiry
+        chain = get_call_chain(ticker, expiry)
+
+        if chain.empty:
+            st.error("Could not load option chain.")
         else:
-            st.error("⚠️ Strike is outside expected move. Low statistical probability.")
+            # Strategy Logic
+            itm_options = chain[chain['strike'] < price * 0.98]
+            cons_call = itm_options.iloc[-1] if not itm_options.empty else chain.iloc[0]
+
+            otm_options = chain[chain['strike'] > price * 1.05]
+            aggr_call = otm_options.iloc[0] if not otm_options.empty else chain.iloc[-1]
+
+            col1, col2 = st.columns(2)
+
+            def display_box(title, contract, risk_amt):
+                mid = (contract['bid'] + contract['ask']) / 2
+                if np.isnan(mid) or mid <= 0: mid = contract['lastPrice']
+                
+                cost = mid * 100
+                risk_per_contract = cost * 0.5
+                max_lots = int(risk_amt / risk_per_contract) if risk_per_contract > 0 else 0
+
+                st.markdown(f"### {title}")
+                st.write(f"**Strike:** ${contract['strike']}")
+                st.success(f"**Target Buy Price:** ${mid:.2f}")
+                
+                if max_lots > 0:
+                    st.metric("Recommended Size", f"{max_lots} Lot(s)", f"Total Cost: ${max_lots*cost:.2f}")
+                else:
+                    st.error(f"Budget too low. 1 lot risks ${risk_per_contract:.2f}.")
+                
+                st.write(f"🔴 Stop Loss: **${mid * 0.5:.2f}**")
+                st.write(f"🟢 Take Profit: **${mid * 2.0:.2f}**")
+
+            with col1: display_box("🛡️ Conservative", cons_call, risk_dollars)
+            with col2: display_box("⚡ Aggressive", aggr_call, risk_dollars)
+
+            # 4. Market Probability Check
+            st.divider()
+            iv = aggr_call['impliedVolatility']
+            days = (datetime.strptime(expiry, '%Y-%m-%d') - datetime.now()).days
+            exp_move = price * iv * np.sqrt(max(days, 1) / 365)
+            
+            st.subheader("📊 Market Probability Check")
+            st.write(f"Expected Move: **±${exp_move:.2f}**")
+            if (aggr_call['strike'] - price) < exp_move:
+                st.success("✅ Strike is within expected move.")
+            else:
+                st.error("⚠️ Strike is outside expected move.")
