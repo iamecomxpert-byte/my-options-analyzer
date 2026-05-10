@@ -27,7 +27,7 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     return round(delta, 2), round(gamma, 4), round(theta, 3)
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Pro Options Analyst v5", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Pro Options Analyst v5.1", layout="wide", page_icon="📈")
 
 # --- CACHED DATA FETCHING ---
 @st.cache_data(ttl=300)
@@ -43,7 +43,9 @@ def get_api_price(ticker, api_key):
 
 @st.cache_data(ttl=600)
 def get_expiries(ticker):
-    try: return list(yf.Ticker(ticker).options)
+    try: 
+        stock = yf.Ticker(ticker)
+        return list(stock.options)
     except: return []
 
 @st.cache_data(ttl=600)
@@ -57,7 +59,7 @@ def get_option_history(contract_symbol):
     except: return pd.DataFrame()
 
 # --- MAIN INTERFACE ---
-st.title("📈 Pro Options Analyst v5")
+st.title("📈 Pro Options Analyst v5.1")
 api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
 ticker = st.text_input("Enter Ticker:", "SHOP").upper()
 
@@ -79,15 +81,18 @@ if ticker and api_key:
                                          float(price*0.7), float(price*1.3), float(price))
             
             expiry = st.selectbox("Select Expiry for Simulation:", expiries, index=min(2, len(expiries)-1))
-            days_total = (datetime.strptime(expiry, '%Y-%m-%d') - datetime.now()).days
-            days_passed_sim = st.slider("Days from Today", 0, days_total, 0)
+            
+            # --- FIX: ROBUST DATE HANDLING ---
+            expiry_str = expiry if isinstance(expiry, str) else expiry.strftime('%Y-%m-%d')
+            days_total = (datetime.strptime(expiry_str, '%Y-%m-%d') - datetime.now()).days
+            
+            days_passed_sim = st.slider("Days from Today", 0, max(0, days_total), 0)
 
         # --- DATA DISPLAY ---
         st.metric(f"{ticker} Current Price", f"${price:.2f}")
-        chain = get_call_chain(ticker, expiry)
+        chain = get_call_chain(ticker, expiry_str)
 
         if not chain.empty:
-            # Strategy selection
             itm = chain[chain['strike'] < price * 0.98]
             cons_call = itm.iloc[-1] if not itm.empty else chain.iloc[0]
             otm = chain[chain['strike'] > price * 1.05]
@@ -99,7 +104,6 @@ if ticker and api_key:
                 with tab:
                     col_pnl, col_greeks, col_chart = st.columns([1, 1, 2])
                     
-                    # Math Constants
                     S_now = price
                     K = contract['strike']
                     sigma = contract['impliedVolatility']
@@ -107,11 +111,9 @@ if ticker and api_key:
                     T_now = max(days_total, 0.5) / 365
                     T_sim = max(days_total - days_passed_sim, 0.5) / 365
                     
-                    # Mid price for entry cost
                     mid_entry = (contract['bid'] + contract['ask']) / 2
                     if np.isnan(mid_entry) or mid_entry <= 0: mid_entry = contract['lastPrice']
                     
-                    # Black-Scholes Valuation
                     val_sim = bs_price(target_price_sim, K, T_sim, r, sigma)
                     delta, gamma, theta = calculate_greeks(S_now, K, T_now, r, sigma)
                     
@@ -123,15 +125,12 @@ if ticker and api_key:
                         
                         st.metric("Est. P/L", f"${total_pnl:,.2f}", f"{((val_sim/mid_entry)-1)*100:.1f}%")
                         st.write(f"Value at T+{days_passed_sim} days: **${val_sim:.2f}**")
-                        st.caption(f"Based on {lots} lots at entry ${mid_entry:.2f}")
 
                     with col_greeks:
                         st.markdown("### Today's Greeks")
                         st.write(f"🔹 **Delta:** {delta}")
                         st.write(f"🔸 **Theta:** -${abs(theta*100):.2f}/day")
                         st.write(f"🔺 **Gamma:** {gamma}")
-                        st.progress(max(0, min(1.0, (days_total - days_passed_sim)/days_total)) if days_total > 0 else 0, 
-                                    text="Time Remaining")
 
                     with col_chart:
                         st.write("**30-Day History**")
