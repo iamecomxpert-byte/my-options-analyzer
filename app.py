@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime
 import numpy as np
 from scipy.stats import norm
+from google import genai
 
 # --- CORE MATH ENGINES ---
 def calculate_greeks(S, K, T, r, sigma, type="call"):
@@ -23,14 +24,35 @@ def bs_price(S, K, T, r, sigma):
     d2 = d1 - sigma * np.sqrt(T)
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
+# --- AI RESEARCH ENGINE ---
+def get_ai_research(ticker):
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        prompt = f"""
+        Provide a factual, bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
+        - Analyst Consensus: Median price target vs current price.
+        - Key Dates: Next earnings date and any major upcoming catalysts.
+        - Recent Sentiment: Summary of top news drivers (last 14 days).
+        - Macro Context: How current inflation/rates affect this specific sector.
+        - Overall View: Should a trader 'Buy' or 'Wait' based on news/sentiment?
+        Format as a clean bulleted list. 8 bullets max. Do not hallucinate.
+        """
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        return response.text
+    except Exception as e:
+        return f"AI Research Error: {str(e)}"
+
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro v6.5", layout="wide")
+st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
 
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_cons_strike': None, 'ai_aggr_strike': None,
-    'current_chain': None
+    'ai_brief': ""
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -51,9 +73,10 @@ with st.sidebar:
 # --- DATA FETCHING ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
-    # Force reset of recommendations to trigger UI refresh
+    # Force reset for new ticker
     st.session_state.ai_cons_strike = None
     st.session_state.ai_aggr_strike = None
+    st.session_state.ai_brief = ""
     
     api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
     url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_input}&apikey={api_key}'
@@ -86,7 +109,6 @@ if st.session_state.price and st.session_state.expiries:
     days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
     T_years = max(days_to_expiry, 0.5) / 365
 
-    # Chain Fetch & Suggestion Logic
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     all_strikes = sorted(chain['strike'].tolist())
     avg_iv = chain['impliedVolatility'].median()
@@ -98,19 +120,19 @@ if st.session_state.price and st.session_state.expiries:
     final_target_price = S * (1 + target_pct / 100)
 
     st.divider()
-    t_cons, t_aggr, t_edu = st.tabs(["🛡️ Conservative", "⚡ Aggressive", "📖 Strategy Guide"])
+    t_cons, t_aggr, t_ai, t_edu = st.tabs(["🛡️ Conservative", "⚡ Aggressive", "🤖 AI Research", "📖 Strategy Guide"])
 
     def render_strategy(tab, ai_val, label, key_suffix):
         with tab:
-            # Dropdown tied to the NEW strikes found for the NEW ticker
+            # Key uses Ticker and Expiry to ensure proper reset on change
             selected_k = st.selectbox(
                 f"Override {label} Strike (Currently viewing ${ai_val}):", 
                 all_strikes, 
                 index=all_strikes.index(ai_val), 
-                key=f"select_{key_suffix}_{st.session_state.current_ticker}"
+                key=f"sel_{key_suffix}_{st.session_state.current_ticker}_{expiry}"
             )
             
-            st.info(f"💡 AI Suggestion: **${ai_val}** based on Expected Move.")
+            st.info(f"💡 AI Suggestion: **${ai_val}** based on Volatility/Expected Move.")
             
             contract = chain[chain['strike'] == selected_k].iloc[0]
             mid_price = (contract['bid'] + contract['ask']) / 2 if contract['bid'] > 0 else contract['lastPrice']
@@ -118,9 +140,9 @@ if st.session_state.price and st.session_state.expiries:
             
             sim_p = bs_price(final_target_price, selected_k, max(days_to_expiry - days_sim, 0.5)/365, 0.05, contract['impliedVolatility'])
             roi = ((sim_p / mid_price) - 1) * 100
-            
-            # SCORING SYSTEM
             score = (1 if st.session_state.trend == "Bullish" else 0) + (1 if d > 0.3 else 0) + (1 if abs(t) < (mid_price * 0.1) else 0)
+            
+            st.markdown(f"### Analysis: **${selected_k} Call**")
             
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
@@ -140,20 +162,20 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
-    with t_edu:
-        st.subheader("How to Read These Recommendations")
-        st.markdown("""
-        ### Verdict Meanings
-        * **✅ HIGH CONVICTION BUY:** All lights are green. The stock is in an uptrend, the Delta (probability) is healthy, and Theta (time decay) isn't too expensive. 
-            * **Upside:** High statistical chance of success.
-            * **Risk:** Unexpected news/earnings can still flip the trend.
-        * **⚠️ CAUTION:** Usually occurs when the trend is bullish but the option is too expensive (Theta), or the probability (Delta) is low.
-        * **❌ NO-BUY:** Usually triggered if the stock is in a **Bearish trend**. Buying calls while a stock is dropping is a low-probability play.
+    with t_ai:
+        st.subheader(f"🤖 Gemini Market Brief: {st.session_state.current_ticker}")
+        if not st.session_state.ai_brief or fetch_btn:
+            with st.spinner("Analyzing web data and catalyst events..."):
+                st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+        st.markdown(st.session_state.ai_brief)
 
-        ### Key Terms
-        * **Delta:** How much the option price moves for every $1 move in the stock. Also a proxy for % chance of winning.
-        * **Theta:** Your daily 'rent'. The amount of value the option loses every day just by existing.
-        * **主力 (Main Force):** Represents where high-volume institutional interest is concentrated.
+    with t_edu:
+        st.subheader("Strategy Playbook")
+        st.markdown("""
+        - **High Conviction:** Math (Greeks) and Momentum (Trend) align.
+        - **Probability (Delta):** Target 0.3 to 0.4 for growth.
+        - **Decay (Theta):** If Theta > 10% of entry daily, the clock is against you.
+        - **AI Brief:** Use to check for 'Earnings Crushes' or 'Analyst Downgrades' before entry.
         """)
 else:
-    st.info("👈 Enter a ticker and click 'Analyze Ticker' to get started.")
+    st.info("👈 Enter a ticker and click 'Analyze Ticker' to start.")
