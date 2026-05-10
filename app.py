@@ -6,10 +6,12 @@ from datetime import datetime
 import numpy as np
 from scipy.stats import norm
 from google import genai
+from google.genai import types
 
 # --- CORE MATH ENGINES ---
 def calculate_greeks(S, K, T, r, sigma, type="call"):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (S * np.sqrt(T)) # Formula fix for standard BS
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     delta = norm.cdf(d1) if type == "call" else norm.cdf(d1) - 1
@@ -24,52 +26,53 @@ def bs_price(S, K, T, r, sigma):
     d2 = d1 - sigma * np.sqrt(T)
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
-# --- AI RESEARCH ENGINE ---
-from google import genai
-from google.genai import types
-
+# --- AI RESEARCH ENGINE (v6.7 Grounding Protocol) ---
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
+    client = genai.Client(api_key=api_key)
+    model_id = "gemini-2.0-flash" # Optimized for 2026 search grounding
+    
+    # Strictly instruct AI to use Google Search tool for 2026 data
+    prompt = f"""
+    Today is {datetime.now().strftime('%B %d, %Y')}. 
+    Use Google Search to provide a FACTUAL REAL-TIME summary for {ticker}.
+    
+    Mandatory Sections:
+    1. Analyst Consensus: Median price target and current rating.
+    2. 2026 Catalyst Calendar: Upcoming earnings or product launches.
+    3. Live Sentiment: Top 3 news stories from the last 14 days.
+    4. View: Buy or Wait based on CURRENT search results.
+
+    STRICT RULES:
+    - Never use prices or results from your internal training memory.
+    - If search results are unavailable, start your response with 'INTERNAL KNOWLEDGE (Knowledge Cutoff: 2024-2025)'.
+    - If search results are used, do not mention the cutoff.
+    """
+    
     try:
-        client = genai.Client(api_key=api_key)
-        
-        # We use the -preview suffix as required by the v1beta API in 2026
-        model_id = "gemini-3-flash-preview" 
-        
-        prompt = f"""
-        Factual bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
-        1. Analyst Consensus: Median price target vs current price.
-        2. Key Dates: Next earnings and major catalysts.
-        3. Recent Sentiment: Summary of top 3 news drivers (last 14 days).
-        4. Macro Context: Inflation/rate impact on this sector.
-        5. Overall View: 'Buy' or 'Wait' based on news sentiment.
-        """
-        
+        # Attempt Search-Grounded Response
         response = client.models.generate_content(
             model=model_id,
             contents=prompt,
             config=types.GenerateContentConfig(
-                # Enable thinking for better reasoning on sentiment
-                thinking_config=types.ThinkingConfig(include_thoughts=False)
+                tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
             )
         )
         return response.text
         
     except Exception as e:
-        # Fallback to the stable 2.5 model if the 3-series preview is hitting a 404/quota
+        # Fallback Protocol: Label clearly as Internal Knowledge
         try:
-            fallback_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
-            return f"⚠️ (Using Fallback Model)\n\n{fallback_response.text}"
+            fallback_prompt = prompt + "\nNote: Websearch failed. Use internal knowledge but DO NOT provide specific current prices."
+            fallback_res = client.models.generate_content(model=model_id, contents=fallback_prompt)
+            return f"### ⚠️ INTERNAL KNOWLEDGE\n**Knowledge Cutoff: Late 2024/Early 2025**\n\n{fallback_res.text}"
         except:
             return f"AI Research Error: {str(e)}"
 
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
+st.set_page_config(page_title="Analyst Pro v6.7", layout="wide")
 
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
@@ -96,13 +99,13 @@ with st.sidebar:
 # --- DATA FETCHING ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
-    # Force reset for new ticker
     st.session_state.ai_cons_strike = None
     st.session_state.ai_aggr_strike = None
     st.session_state.ai_brief = ""
     
-    api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
-    url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_input}&apikey={api_key}'
+    # Use Alpha Vantage with YFinance fallback
+    api_key_av = st.secrets.get("ALPHA_VANTAGE_KEY")
+    url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_input}&apikey={api_key_av}'
     try:
         r = requests.get(url, timeout=10).json()
         st.session_state.price = float(r["Global Quote"]["05. price"])
@@ -147,7 +150,6 @@ if st.session_state.price and st.session_state.expiries:
 
     def render_strategy(tab, ai_val, label, key_suffix):
         with tab:
-            # Key uses Ticker and Expiry to ensure proper reset on change
             selected_k = st.selectbox(
                 f"Override {label} Strike (Currently viewing ${ai_val}):", 
                 all_strikes, 
@@ -155,7 +157,7 @@ if st.session_state.price and st.session_state.expiries:
                 key=f"sel_{key_suffix}_{st.session_state.current_ticker}_{expiry}"
             )
             
-            st.info(f"💡 AI Suggestion: **${ai_val}** based on Volatility/Expected Move.")
+            st.info(f"💡 AI Suggestion: **${ai_val}**")
             
             contract = chain[chain['strike'] == selected_k].iloc[0]
             mid_price = (contract['bid'] + contract['ask']) / 2 if contract['bid'] > 0 else contract['lastPrice']
@@ -186,9 +188,9 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
     with t_ai:
-        st.subheader(f"🤖 Gemini Market Brief: {st.session_state.current_ticker}")
+        st.subheader(f"🤖 Gemini Intelligence: {st.session_state.current_ticker}")
         if not st.session_state.ai_brief or fetch_btn:
-            with st.spinner("Analyzing web data and catalyst events..."):
+            with st.spinner("Searching web for real-time 2026 data..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
@@ -196,9 +198,7 @@ if st.session_state.price and st.session_state.expiries:
         st.subheader("Strategy Playbook")
         st.markdown("""
         - **High Conviction:** Math (Greeks) and Momentum (Trend) align.
-        - **Probability (Delta):** Target 0.3 to 0.4 for growth.
-        - **Decay (Theta):** If Theta > 10% of entry daily, the clock is against you.
-        - **AI Brief:** Use to check for 'Earnings Crushes' or 'Analyst Downgrades' before entry.
+        - **AI Brief:** Prioritize this to avoid 'Earnings Crushes'.
         """)
 else:
     st.info("👈 Enter a ticker and click 'Analyze Ticker' to start.")
