@@ -1,6 +1,7 @@
 streamlit
 yfinance
-requests
 pandas
 numpy
 scipy
+requests
+google-genai
