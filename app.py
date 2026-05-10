@@ -40,10 +40,18 @@ def get_api_price(ticker, api_key):
 @st.cache_data(ttl=600)
 def get_expiries(ticker):
     try:
+        # We manually trigger a 'fast_info' call to wake up the connection
         stock = yf.Ticker(ticker)
+        _ = stock.fast_info 
+        
         options = stock.options
-        return list(options) if options else []
-    except: return []
+        if options:
+            return list(options)
+        return []
+    except Exception as e:
+        # If Yahoo is totally blocked, we log it for the user
+        st.sidebar.error(f"Yahoo Connection Error: {str(e)}")
+        return []
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Modular Options Analyst v5.5", layout="wide")
