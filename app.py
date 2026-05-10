@@ -25,6 +25,7 @@ def bs_price(S, K, T, r, sigma):
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
 # --- AI RESEARCH ENGINE ---
+import time
 from google import genai
 from google.genai import types
 
@@ -32,37 +33,42 @@ def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
-    try:
-        client = genai.Client(api_key=api_key)
-        
-        # PROMPT: We explicitly tell the AI it IS 2026 and to use Google Search
-        prompt = f"""
-        Today is {datetime.now().strftime('%B %d, %2026')}. 
-        Perform a Google Search to provide a REAL-TIME factual cheat sheet for {ticker}.
-        
-        Requirements:
-        1. ANALYST CONSENSUS: What is the current median price target and consensus rating (e.g., Moderate Buy)?
-        2. Q1 2026 RECAP: Summarize the May 5, 2026 earnings results (Revenue growth, GMV, and FCF margins).
-        3. UPCOMING CATALYSTS: Mention the $2B stock repurchase and the 'Agentic Storefront' AI launch.
-        4. SENTIMENT: Why did the stock sell off post-earnings despite the beat (e.g., margin concerns)?
-        5. OVERALL VIEW: 1-sentence 'Buy' or 'Wait' based on current 2026 market conditions.
-        
-        Format as 6-8 sharp bullets. No disclaimers about 2024 cutoff—use your tools to see 2026.
-        """
-        
-        # 2026 PROTOCOL: Enable the Google Search Tool
-        response = client.models.generate_content(
-            model="gemini-2.0-flash", # Or gemini-3-flash-preview
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
-            )
-        )
-        
-        return response.text
+    # Configuration: Lite models have much better free-tier availability in 2026
+    # 3.1-Flash-Lite is the workhorse for high-frequency free apps
+    model_id = "gemini-3.1-flash-lite-preview" 
+    
+    client = genai.Client(api_key=api_key)
+    
+    prompt = f"""
+    Today is {datetime.now().strftime('%B %d, 2026')}. 
+    Search the web for {ticker} and provide a REAL-TIME factual cheat sheet.
+    - Analyst Consensus (2026 price targets).
+    - Q1 2026 Recap (May earnings result).
+    - Upcoming catalysts (stock buybacks or AI launches).
+    - Quick 'Buy' or 'Wait' sentiment view.
+    Limit to 6 bullet points. Use actual 2026 data.
+    """
 
-    except Exception as e:
-        return f"Live Research Error: {str(e)}"
+    # Retry Logic (Backoff)
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_id,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearchRetrieval())],
+                    temperature=0.2 # Lower temperature for factual accuracy
+                )
+            )
+            return response.text
+        except Exception as e:
+            if "429" in str(e):
+                wait_time = (attempt + 1) * 3 # Wait 3s, then 6s
+                time.sleep(wait_time)
+                continue
+            return f"Research Error: {str(e)}"
+    
+    return "❌ API Busy: Google's free tier is congested. Please try again in 1 minute."
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
