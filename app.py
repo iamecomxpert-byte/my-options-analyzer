@@ -27,7 +27,7 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     return round(delta, 2), round(gamma, 4), round(theta, 3)
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Pro Options Analyst v5.1", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Pro Options Analyst v5.2", layout="wide", page_icon="📈")
 
 # --- CACHED DATA FETCHING ---
 @st.cache_data(ttl=300)
@@ -49,8 +49,10 @@ def get_expiries(ticker):
     except: return []
 
 @st.cache_data(ttl=600)
-def get_call_chain(ticker, expiry):
-    try: return yf.Ticker(ticker).option_chain(expiry).calls
+def get_call_chain(ticker, expiry_str):
+    try: 
+        stock = yf.Ticker(ticker)
+        return stock.option_chain(expiry_str).calls
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -59,7 +61,7 @@ def get_option_history(contract_symbol):
     except: return pd.DataFrame()
 
 # --- MAIN INTERFACE ---
-st.title("📈 Pro Options Analyst v5.1")
+st.title("📈 Pro Options Analyst v5.2")
 api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
 ticker = st.text_input("Enter Ticker:", "SHOP").upper()
 
@@ -80,11 +82,12 @@ if ticker and api_key:
             target_price_sim = st.slider("Simulated Stock Price ($)", 
                                          float(price*0.7), float(price*1.3), float(price))
             
-            expiry = st.selectbox("Select Expiry for Simulation:", expiries, index=min(2, len(expiries)-1))
+            expiry_selection = st.selectbox("Select Expiry for Simulation:", expiries, index=min(2, len(expiries)-1))
             
-            # --- FIX: ROBUST DATE HANDLING ---
-            expiry_str = expiry if isinstance(expiry, str) else expiry.strftime('%Y-%m-%d')
-            days_total = (datetime.strptime(expiry_str, '%Y-%m-%d') - datetime.now()).days
+            # --- FIX: THE BULLETPROOF CONVERTER ---
+            expiry_dt = pd.to_datetime(expiry_selection)
+            expiry_str = expiry_dt.strftime('%Y-%m-%d')
+            days_total = (expiry_dt.date() - datetime.now().date()).days
             
             days_passed_sim = st.slider("Days from Today", 0, max(0, days_total), 0)
 
