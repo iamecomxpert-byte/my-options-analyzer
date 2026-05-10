@@ -25,12 +25,17 @@ def bs_price(S, K, T, r, sigma):
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
 # --- AI RESEARCH ENGINE ---
+from google import genai  # Ensure this is the only google import
+
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    if not api_key: 
+        return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     try:
+        # Initialize the Modern 2026 Client
         client = genai.Client(api_key=api_key)
+        
         prompt = f"""
         Provide a factual, bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
         - Analyst Consensus: Median price target vs current price.
@@ -40,10 +45,17 @@ def get_ai_research(ticker):
         - Overall View: Should a trader 'Buy' or 'Wait' based on news/sentiment?
         Format as a clean bulleted list. 8 bullets max. Do not hallucinate.
         """
-        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        
+        # Correct 2026 method call
+        response = client.models.generate_content(
+            model="gemini-3-flash", 
+            contents=prompt
+        )
+        
         return response.text
     except Exception as e:
-        return f"AI Research Error: {str(e)}"
+        # If 'models' attribute error persists, it's likely a version mismatch
+        return f"AI Research Error: {str(e)}. Check if 'google-genai' is correctly installed in requirements.txt."
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
