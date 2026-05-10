@@ -35,38 +35,34 @@ def get_ai_research(ticker):
     try:
         client = genai.Client(api_key=api_key)
         
-        # We use the -preview suffix as required by the v1beta API in 2026
-        model_id = "gemini-3-flash-preview" 
-        
+        # PROMPT: We explicitly tell the AI it IS 2026 and to use Google Search
         prompt = f"""
-        Factual bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
-        1. Analyst Consensus: Median price target vs current price.
-        2. Key Dates: Next earnings and major catalysts.
-        3. Recent Sentiment: Summary of top 3 news drivers (last 14 days).
-        4. Macro Context: Inflation/rate impact on this sector.
-        5. Overall View: 'Buy' or 'Wait' based on news sentiment.
+        Today is {datetime.now().strftime('%B %d, %2026')}. 
+        Perform a Google Search to provide a REAL-TIME factual cheat sheet for {ticker}.
+        
+        Requirements:
+        1. ANALYST CONSENSUS: What is the current median price target and consensus rating (e.g., Moderate Buy)?
+        2. Q1 2026 RECAP: Summarize the May 5, 2026 earnings results (Revenue growth, GMV, and FCF margins).
+        3. UPCOMING CATALYSTS: Mention the $2B stock repurchase and the 'Agentic Storefront' AI launch.
+        4. SENTIMENT: Why did the stock sell off post-earnings despite the beat (e.g., margin concerns)?
+        5. OVERALL VIEW: 1-sentence 'Buy' or 'Wait' based on current 2026 market conditions.
+        
+        Format as 6-8 sharp bullets. No disclaimers about 2024 cutoff—use your tools to see 2026.
         """
         
+        # 2026 PROTOCOL: Enable the Google Search Tool
         response = client.models.generate_content(
-            model=model_id,
+            model="gemini-2.0-flash", # Or gemini-3-flash-preview
             contents=prompt,
             config=types.GenerateContentConfig(
-                # Enable thinking for better reasoning on sentiment
-                thinking_config=types.ThinkingConfig(include_thoughts=False)
+                tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
             )
         )
-        return response.text
         
+        return response.text
+
     except Exception as e:
-        # Fallback to the stable 2.5 model if the 3-series preview is hitting a 404/quota
-        try:
-            fallback_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
-            return f"⚠️ (Using Fallback Model)\n\n{fallback_response.text}"
-        except:
-            return f"AI Research Error: {str(e)}"
+        return f"Live Research Error: {str(e)}"
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
