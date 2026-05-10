@@ -27,7 +27,7 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     return round(delta, 2), round(gamma, 4), round(theta, 3)
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Pro Options Analyst v5.2", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Pro Options Analyst v5.3", layout="wide", page_icon="📈")
 
 # --- CACHED DATA FETCHING ---
 @st.cache_data(ttl=300)
@@ -45,7 +45,8 @@ def get_api_price(ticker, api_key):
 def get_expiries(ticker):
     try: 
         stock = yf.Ticker(ticker)
-        return list(stock.options)
+        opts = list(stock.options)
+        return opts if opts else []
     except: return []
 
 @st.cache_data(ttl=600)
@@ -61,7 +62,7 @@ def get_option_history(contract_symbol):
     except: return pd.DataFrame()
 
 # --- MAIN INTERFACE ---
-st.title("📈 Pro Options Analyst v5.2")
+st.title("📈 Pro Options Analyst v5.3")
 api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
 ticker = st.text_input("Enter Ticker:", "SHOP").upper()
 
@@ -69,7 +70,7 @@ if ticker and api_key:
     price, p_error = get_api_price(ticker, api_key)
     expiries = get_expiries(ticker)
     
-    if price:
+    if price and expiries:
         # --- SIDEBAR SIMULATOR ---
         with st.sidebar:
             st.header("💰 Risk & Wallet")
@@ -84,12 +85,18 @@ if ticker and api_key:
             
             expiry_selection = st.selectbox("Select Expiry for Simulation:", expiries, index=min(2, len(expiries)-1))
             
-            # --- FIX: THE BULLETPROOF CONVERTER ---
-            expiry_dt = pd.to_datetime(expiry_selection)
-            expiry_str = expiry_dt.strftime('%Y-%m-%d')
-            days_total = (expiry_dt.date() - datetime.now().date()).days
-            
-            days_passed_sim = st.slider("Days from Today", 0, max(0, days_total), 0)
+            # --- FIX: THE BULLETPROOF CONVERTER v2 ---
+            if expiry_selection:
+                expiry_dt = pd.to_datetime(expiry_selection)
+                if pd.notnull(expiry_dt):
+                    expiry_str = expiry_dt.strftime('%Y-%m-%d')
+                    days_total = (expiry_dt.date() - datetime.now().date()).days
+                    days_passed_sim = st.slider("Days from Today", 0, max(0, days_total), 0)
+                else:
+                    st.error("Invalid expiry date.")
+                    st.stop()
+            else:
+                st.stop()
 
         # --- DATA DISPLAY ---
         st.metric(f"{ticker} Current Price", f"${price:.2f}")
@@ -143,3 +150,5 @@ if ticker and api_key:
 
             render_strategy(tab1, cons_call)
             render_strategy(tab2, aggr_call)
+    elif ticker and not expiries:
+        st.info("Loading options data... if this takes too long, the ticker might not have options available.")
