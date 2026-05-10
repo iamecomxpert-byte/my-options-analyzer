@@ -1,4 +1,4 @@
 streamlit
-yfinance
+yfinance>=0.2.40  # Ensures you have a recent version with better bypasses
 pandas
 numpy
