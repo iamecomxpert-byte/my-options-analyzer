@@ -204,10 +204,28 @@ if st.session_state.price and st.session_state.expiries:
             st.caption(f"Last Live Scan: {st.session_state.last_refresh} | Strictly grounded in Google Search.")
 
     with t_edu:
-        st.subheader("Strategy Playbook")
-        st.markdown("""
-        - **High Conviction:** Math (Greeks) and Momentum (Trend) align.
-        - **AI Brief:** Prioritize this to avoid 'Earnings Crushes'.
-        """)
+        st.subheader("📖 Strategy Playbook")
+        
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("""
+            #### ⚖️ The High-Conviction Checklist
+            - **Trend Alignment:** 20-Day SMA should be Bullish.
+            - **Delta Check:** Aim for >0.30 for a healthy probability.
+            - **Theta Buffer:** Ensure 'Days in Future' doesn't kill your ROI.
+            - **AI Clearance:** No earnings/catalysts within the trade window.
+            """)
+        
+        with col_g2:
+            st.markdown("""
+            #### 📉 Risk Management
+            - **Stop Loss:** Set an exit alarm if the option loses 30-50% value.
+            - **Profit Taking:** Consider scaling out at 50% ROI.
+            - **IV Crush:** Avoid buying right before earnings.
+            """)
+            
+        st.divider()
+        st.info("💡 **Note on AI:** The Research tab uses Google Search AI. If it reports 'Quota Exhausted', wait 60 seconds and hit Refresh. It is strictly grounded in 2026 data.")
+        
 else:
     st.info("👈 Enter a ticker and click 'Analyze Ticker' to start.")
