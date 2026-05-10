@@ -24,13 +24,17 @@ def bs_price(S, K, T, r, sigma):
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro v6.3", layout="wide")
+st.set_page_config(page_title="Analyst Pro v6.4", layout="wide")
 
-for key in ['price', 'trend', 'sma20', 'pct_change', 'stock_name', 'expiries', 'current_ticker', 'credits_used']:
+# Persistent state keys
+state_keys = {
+    'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
+    'stock_name': None, 'expiries': [], 'current_ticker': "", 
+    'credits_used': 0, 'ai_cons_strike': None, 'ai_aggr_strike': None
+}
+for key, default in state_keys.items():
     if key not in st.session_state:
-        if key == 'expiries': st.session_state[key] = []
-        elif key == 'credits_used': st.session_state[key] = 0
-        else: st.session_state[key] = None
+        st.session_state[key] = default
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -41,14 +45,17 @@ with st.sidebar:
     
     st.divider()
     st.header("🧪 Simulator")
-    # Percentage-based target price slider
     target_pct = st.slider("Target Price Change (%)", -30, 50, 0, step=1)
     days_sim = st.slider("Days in Future", 0, 30, 0)
 
-# --- DATA LOGIC ---
+# --- DATA FETCHING LOGIC ---
 if fetch_btn or st.session_state.price:
     if fetch_btn:
         st.session_state.current_ticker = ticker
+        # Reset strikes so they don't carry over from previous ticker
+        st.session_state.ai_cons_strike = None
+        st.session_state.ai_aggr_strike = None
+        
         api_key = st.secrets.get("ALPHA_VANTAGE_KEY")
         url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}'
         try:
@@ -62,9 +69,10 @@ if fetch_btn or st.session_state.price:
         st.session_state.stock_name = stock_obj.info.get('longName', ticker)
         st.session_state.expiries = list(stock_obj.options)
         hist = stock_obj.history(period="50d")
-        sma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
-        st.session_state.trend = "Bullish" if hist['Close'].iloc[-1] > sma20 else "Bearish"
-        st.session_state.pct_change = ((hist['Close'].iloc[-1] / hist['Close'].iloc[-20]) - 1) * 100
+        if not hist.empty:
+            sma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
+            st.session_state.trend = "Bullish" if hist['Close'].iloc[-1] > sma20 else "Bearish"
+            st.session_state.pct_change = ((hist['Close'].iloc[-1] / hist['Close'].iloc[-20]) - 1) * 100
 
     S = st.session_state.price
     st.header(f"{st.session_state.stock_name} ({st.session_state.current_ticker})")
@@ -73,51 +81,57 @@ if fetch_btn or st.session_state.price:
     col_p.metric("Current Price", f"${S:.2f}")
     col_t.metric("20-Day Trend", st.session_state.trend, f"{st.session_state.pct_change:.1f}%")
 
+    # EXPIRY & CHAIN
     expiry = st.selectbox("Select Expiry Date:", st.session_state.expiries)
     days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
     T_years = max(days_to_expiry, 0.5) / 365
 
-    # Fetch Chain
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     all_strikes = chain['strike'].tolist()
     avg_iv = chain['impliedVolatility'].median()
     expected_move = S * avg_iv * np.sqrt(T_years)
 
-    # AI Suggestion logic
-    ai_cons = all_strikes[min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - (S + expected_move*0.3)))]
-    ai_aggr = all_strikes[min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - (S + expected_move*0.8)))]
+    # AI Suggestion Logic (Only runs if strikes are None or Ticker changed)
+    st.session_state.ai_cons_strike = all_strikes[min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - (S + expected_move*0.3)))]
+    st.session_state.ai_aggr_strike = all_strikes[min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - (S + expected_move*0.8)))]
 
-    # Calculate target price from percentage
     final_target_price = S * (1 + target_pct / 100)
 
     st.divider()
     t_cons, t_aggr = st.tabs(["🛡️ Conservative", "⚡ Aggressive"])
 
-    def render_strategy(tab, ai_suggested_strike, label):
+    def render_strategy(tab, ai_val, label, key_suffix):
         with tab:
-            selected_k = st.selectbox(f"Select {label} Strike:", all_strikes, index=all_strikes.index(ai_suggested_strike), key=f"k_{label}")
-            contract = chain[chain['strike'] == selected_k].iloc[0]
+            # The dropdown now uses 'index' based on the AI suggested strike
+            selected_k = st.selectbox(
+                f"Override {label} Strike:", 
+                all_strikes, 
+                index=all_strikes.index(ai_val), 
+                key=f"select_{key_suffix}"
+            )
             
+            # Persistent reminder of AI recommendation
+            st.info(f"💡 AI Recommended {label} Strike: **${ai_val}**")
+            
+            contract = chain[chain['strike'] == selected_k].iloc[0]
             mid_price = (contract['bid'] + contract['ask']) / 2 if contract['bid'] > 0 else contract['lastPrice']
             d, g, t, v = calculate_greeks(S, selected_k, T_years, 0.05, contract['impliedVolatility'])
             
-            # SIM ROI using percentage-derived target price
             sim_p = bs_price(final_target_price, selected_k, max(days_to_expiry - days_sim, 0.5)/365, 0.05, contract['impliedVolatility'])
             roi = ((sim_p / mid_price) - 1) * 100
-
             score = (1 if st.session_state.trend == "Bullish" else 0) + (1 if d > 0.3 else 0) + (1 if abs(t) < (mid_price * 0.1) else 0)
             
-            st.markdown(f"### Selected Strike: **${selected_k}**")
+            st.markdown(f"### Current Analysis: **${selected_k} Call**")
             
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
                 if score >= 3: st.success("✅ HIGH CONVICTION BUY")
                 elif score == 2: st.warning("⚠️ CAUTION: SETUP WEAK")
                 else: st.error("❌ NO-BUY: POOR PROBABILITY")
-                st.metric("Target Entry", f"${mid_price:.2f}")
+                st.metric("Target Entry (Mid)", f"${mid_price:.2f}")
                 st.metric("Simulated ROI", f"{roi:.1f}%")
             with c2:
-                st.write(f"**Greeks & Probability**")
+                st.write("**Greeks & Probability**")
                 st.write(f"Delta: `{d}`")
                 st.write(f"Theta: `-{abs(t):.2f}/day`")
                 st.write(f"Prob. ITM: `{d*100:.1f}%`主力")
@@ -127,5 +141,5 @@ if fetch_btn or st.session_state.price:
                     st.write("**Contract Price History (30d)**")
                     st.line_chart(h['Close'])
 
-    render_strategy(t_cons, ai_cons, "Conservative")
-    render_strategy(t_aggr, ai_aggr, "Aggressive")
+    render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
+    render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
