@@ -26,25 +26,29 @@ def bs_price(S, K, T, r, sigma):
     d2 = d1 - sigma * np.sqrt(T)
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
-# --- AI RESEARCH ENGINE (Strict Live-Search Protocol) ---
+# --- AI RESEARCH ENGINE (Google Search AI Grounding) ---
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     client = genai.Client(api_key=api_key)
-    # Using the standard production model for web search
+    # Using 2.0 Flash for optimized real-time web grounding
     model_id = "gemini-2.0-flash" 
     
     prompt = f"""
-    Today is {datetime.now().strftime('%B %d, %Y')}. 
-    Provide a factual bulleted cheat sheet for {ticker}.
-    1. Analyst Consensus: Median price target and rating.
-    2. Catalyst Calendar: Upcoming earnings/events.
-    3. Sentiment: Top 3 news drivers.
-    4. View: Buy or Wait based on current context.
-    Limit to 6 bullets.
+    Perform a live web search for the stock ticker {ticker}. 
+    Today is {datetime.now().strftime('%B %d, %Y')}.
     
-    MANDATORY: You must use the Google Search tool. Do NOT use internal knowledge for pricing or sentiment.
+    Provide a factual bulleted cheat sheet:
+    1. Analyst Consensus: Current median price target and rating.
+    2. Catalyst Calendar: Next earnings date and any upcoming investor days.
+    3. Sentiment: Top 3 news drivers from the last 7 days.
+    4. View: Factual 'Buy' or 'Wait' summary based on the latest analyst updates.
+    
+    MANDATORY: 
+    - Use the Google Search tool for all data. 
+    - Cite specific dates for earnings and events.
+    - DO NOT use internal knowledge for price targets or sentiment.
     """
 
     try:
@@ -52,19 +56,19 @@ def get_ai_research(ticker):
             model=model_id,
             contents=prompt,
             config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
+                tools=[types.Tool(google_search=types.GoogleSearch())] 
             )
         )
         return response.text
 
     except Exception as e:
-        # STRICT OVERRIDE: No internal knowledge fallback. 
-        # If search fails, we fail gracefully and tell the user.
-        return f"❌ **Live Web Search Unavailable.**\n\nThe Google Search API is currently congested. Per strict system parameters, internal AI knowledge has been disabled to prevent outdated or hallucinated pricing.\n\n*Please wait 60 seconds and use the **Refresh AI** button above to retry.*\n\n*(Error detail: {str(e)[:80]}...)*"
-
+        error_msg = str(e)
+        if "429" in error_msg:
+            return "❌ **Quota Exhausted.** Google Search AI is rate-limited. Please wait 60s and Refresh."
+        return f"❌ **Search AI Unavailable.** (Detail: {error_msg[:60]}...)"
 
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro v6.8", layout="wide")
+st.set_page_config(page_title="Analyst Pro v6.9", layout="wide")
 
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
@@ -93,7 +97,7 @@ if fetch_btn:
     st.session_state.current_ticker = ticker_input
     st.session_state.ai_cons_strike = None
     st.session_state.ai_aggr_strike = None
-    st.session_state.ai_brief = ""
+    st.session_state.ai_brief = "" # Reset brief on new ticker
     
     api_key_av = st.secrets.get("ALPHA_VANTAGE_KEY")
     url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_input}&apikey={api_key_av}'
@@ -178,25 +182,26 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
-    # --- AI TAB WITH REFRESH BUTTON ---
+    # --- AI TAB WITH SEARCH AI & REFRESH ---
     with t_ai:
         c1, c2 = st.columns([4, 1])
         with c1:
-            st.subheader(f"🤖 Gemini Intelligence: {st.session_state.current_ticker}")
+            st.subheader(f"🌐 Search AI Intelligence: {st.session_state.current_ticker}")
         with c2:
-            # The Mini Refresh Button
             if st.button("🔄 Refresh AI", use_container_width=True):
                 st.session_state.ai_brief = ""
+                st.rerun()
                 
-        if not st.session_state.ai_brief or fetch_btn:
-            with st.spinner("Searching web for real-time data..."):
+        if not st.session_state.ai_brief:
+            with st.spinner(f"Scanning the live web for {st.session_state.current_ticker}..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
                 st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
                 
         st.markdown(st.session_state.ai_brief)
         
         if st.session_state.last_refresh != "Never" and "❌" not in st.session_state.ai_brief:
-            st.caption(f"Last updated: {st.session_state.last_refresh} | Strictly grounded in Google Search.")
+            st.divider()
+            st.caption(f"Last Live Scan: {st.session_state.last_refresh} | Strictly grounded in Google Search.")
 
     with t_edu:
         st.subheader("Strategy Playbook")
