@@ -32,9 +32,9 @@ def get_ai_research(ticker):
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     client = genai.Client(api_key=api_key)
-    model_id = "gemini-2.0-flash" 
+    # Using 1.5 Flash as the backup as it often has higher basic text quotas
+    model_id = "gemini-1.5-flash" 
     
-    # Base prompt used for both attempts
     base_prompt = f"""
     Today is {datetime.now().strftime('%B %d, %Y')}. 
     Provide a factual bulleted cheat sheet for {ticker}.
@@ -45,42 +45,38 @@ def get_ai_research(ticker):
     Limit to 6 bullets.
     """
 
-    # --- ATTEMPT 1: LIVE WEB SEARCH ---
+    # --- LEVEL 1: LIVE SEARCH (The Gold Standard) ---
     try:
-        search_prompt = base_prompt + "\nMandatory: Use Google Search for real-time 2026 data. Do not use internal memory for prices."
         response = client.models.generate_content(
-            model=model_id,
-            contents=search_prompt,
+            model="gemini-2.0-flash",
+            contents=base_prompt + "\nMandatory: Use Google Search for real-time 2026 data.",
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
             )
         )
         return response.text
-    
-    # --- ATTEMPT 2: FALLBACK (INTERNAL KNOWLEDGE) ---
-    except Exception as e:
-        # Check if error is Rate Limit (429) or Service Unavailable
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            try:
-                fallback_prompt = f"""
-                {base_prompt}
-                
-                STRICT INSTRUCTIONS:
-                - Start with the header: '### ⚠️ INTERNAL KNOWLEDGE (Knowledge Cutoff: Late 2025)'
-                - Mention that live websearch is currently at capacity.
-                - Never provide a 'current' 2026 price; instead, discuss historical price ranges and core fundamentals.
-                """
-                
-                # Execute without the Search Tool
-                fallback_res = client.models.generate_content(
-                    model=model_id, 
-                    contents=fallback_prompt
-                )
-                return fallback_res.text
-            except Exception as fallback_err:
-                return f"Critical API Error: {str(fallback_err)}"
+
+    except Exception:
+        # --- LEVEL 2: INTERNAL KNOWLEDGE (The Safety Net) ---
+        # If we reach here, the Search Tool is definitely exhausted or blocked.
+        try:
+            fallback_prompt = f"""
+            {base_prompt}
+            STRICT INSTRUCTIONS:
+            - Start with: '### ⚠️ INTERNAL KNOWLEDGE (Knowledge Cutoff: 2025)'
+            - Live websearch is currently unavailable due to API limits.
+            - Do not provide current 2026 prices. Focus on fundamentals and 2025 trends.
+            """
+            # We call the model WITHOUT the tools parameter
+            fallback_res = client.models.generate_content(
+                model=model_id, 
+                contents=fallback_prompt
+            )
+            return fallback_res.text
         
-        return f"Research Error: {str(e)}"
+        except Exception as final_err:
+            # --- LEVEL 3: THE EMERGENCY MESSAGE ---
+            return f"❌ **Market Data Unavailable:** The AI service is currently overloaded. Please try again in a few minutes. (Error: {str(final_err)[:50]}...)"
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.7", layout="wide")
