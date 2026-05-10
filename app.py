@@ -11,7 +11,7 @@ from google.genai import types
 # --- CORE MATH ENGINES ---
 def calculate_greeks(S, K, T, r, sigma, type="call"):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (S * np.sqrt(T)) # Formula fix for standard BS
+    # Standard BS formula
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     delta = norm.cdf(d1) if type == "call" else norm.cdf(d1) - 1
@@ -26,16 +26,16 @@ def bs_price(S, K, T, r, sigma):
     d2 = d1 - sigma * np.sqrt(T)
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
-# --- AI RESEARCH ENGINE (v6.7 Grounding Protocol) ---
+# --- AI RESEARCH ENGINE (Strict Live-Search Protocol) ---
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     client = genai.Client(api_key=api_key)
-    # Using 1.5 Flash as the backup as it often has higher basic text quotas
-    model_id = "gemini-1.5-flash" 
+    # Using the standard production model for web search
+    model_id = "gemini-2.0-flash" 
     
-    base_prompt = f"""
+    prompt = f"""
     Today is {datetime.now().strftime('%B %d, %Y')}. 
     Provide a factual bulleted cheat sheet for {ticker}.
     1. Analyst Consensus: Median price target and rating.
@@ -43,49 +43,34 @@ def get_ai_research(ticker):
     3. Sentiment: Top 3 news drivers.
     4. View: Buy or Wait based on current context.
     Limit to 6 bullets.
+    
+    MANDATORY: You must use the Google Search tool. Do NOT use internal knowledge for pricing or sentiment.
     """
 
-    # --- LEVEL 1: LIVE SEARCH (The Gold Standard) ---
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=base_prompt + "\nMandatory: Use Google Search for real-time 2026 data.",
+            model=model_id,
+            contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
             )
         )
         return response.text
 
-    except Exception:
-        # --- LEVEL 2: INTERNAL KNOWLEDGE (The Safety Net) ---
-        # If we reach here, the Search Tool is definitely exhausted or blocked.
-        try:
-            fallback_prompt = f"""
-            {base_prompt}
-            STRICT INSTRUCTIONS:
-            - Start with: '### ⚠️ INTERNAL KNOWLEDGE (Knowledge Cutoff: 2025)'
-            - Live websearch is currently unavailable due to API limits.
-            - Do not provide current 2026 prices. Focus on fundamentals and 2025 trends.
-            """
-            # We call the model WITHOUT the tools parameter
-            fallback_res = client.models.generate_content(
-                model=model_id, 
-                contents=fallback_prompt
-            )
-            return fallback_res.text
-        
-        except Exception as final_err:
-            # --- LEVEL 3: THE EMERGENCY MESSAGE ---
-            return f"❌ **Market Data Unavailable:** The AI service is currently overloaded. Please try again in a few minutes. (Error: {str(final_err)[:50]}...)"
+    except Exception as e:
+        # STRICT OVERRIDE: No internal knowledge fallback. 
+        # If search fails, we fail gracefully and tell the user.
+        return f"❌ **Live Web Search Unavailable.**\n\nThe Google Search API is currently congested. Per strict system parameters, internal AI knowledge has been disabled to prevent outdated or hallucinated pricing.\n\n*Please wait 60 seconds and use the **Refresh AI** button above to retry.*\n\n*(Error detail: {str(e)[:80]}...)*"
+
 
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro v6.7", layout="wide")
+st.set_page_config(page_title="Analyst Pro v6.8", layout="wide")
 
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_cons_strike': None, 'ai_aggr_strike': None,
-    'ai_brief': ""
+    'ai_brief': "", 'last_refresh': "Never"
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -110,7 +95,6 @@ if fetch_btn:
     st.session_state.ai_aggr_strike = None
     st.session_state.ai_brief = ""
     
-    # Use Alpha Vantage with YFinance fallback
     api_key_av = st.secrets.get("ALPHA_VANTAGE_KEY")
     url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_input}&apikey={api_key_av}'
     try:
@@ -194,12 +178,25 @@ if st.session_state.price and st.session_state.expiries:
     render_strategy(t_cons, st.session_state.ai_cons_strike, "Conservative", "cons")
     render_strategy(t_aggr, st.session_state.ai_aggr_strike, "Aggressive", "aggr")
 
+    # --- AI TAB WITH REFRESH BUTTON ---
     with t_ai:
-        st.subheader(f"🤖 Gemini Intelligence: {st.session_state.current_ticker}")
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.subheader(f"🤖 Gemini Intelligence: {st.session_state.current_ticker}")
+        with c2:
+            # The Mini Refresh Button
+            if st.button("🔄 Refresh AI", use_container_width=True):
+                st.session_state.ai_brief = ""
+                
         if not st.session_state.ai_brief or fetch_btn:
-            with st.spinner("Searching web for real-time 2026 data..."):
+            with st.spinner("Searching web for real-time data..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+                st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
+                
         st.markdown(st.session_state.ai_brief)
+        
+        if st.session_state.last_refresh != "Never" and "❌" not in st.session_state.ai_brief:
+            st.caption(f"Last updated: {st.session_state.last_refresh} | Strictly grounded in Google Search.")
 
     with t_edu:
         st.subheader("Strategy Playbook")
