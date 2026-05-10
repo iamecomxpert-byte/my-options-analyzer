@@ -32,44 +32,55 @@ def get_ai_research(ticker):
     if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     client = genai.Client(api_key=api_key)
-    model_id = "gemini-2.0-flash" # Optimized for 2026 search grounding
+    model_id = "gemini-2.0-flash" 
     
-    # Strictly instruct AI to use Google Search tool for 2026 data
-    prompt = f"""
+    # Base prompt used for both attempts
+    base_prompt = f"""
     Today is {datetime.now().strftime('%B %d, %Y')}. 
-    Use Google Search to provide a FACTUAL REAL-TIME summary for {ticker}.
-    
-    Mandatory Sections:
-    1. Analyst Consensus: Median price target and current rating.
-    2. 2026 Catalyst Calendar: Upcoming earnings or product launches.
-    3. Live Sentiment: Top 3 news stories from the last 14 days.
-    4. View: Buy or Wait based on CURRENT search results.
-
-    STRICT RULES:
-    - Never use prices or results from your internal training memory.
-    - If search results are unavailable, start your response with 'INTERNAL KNOWLEDGE (Knowledge Cutoff: 2024-2025)'.
-    - If search results are used, do not mention the cutoff.
+    Provide a factual bulleted cheat sheet for {ticker}.
+    1. Analyst Consensus: Median price target and rating.
+    2. Catalyst Calendar: Upcoming earnings/events.
+    3. Sentiment: Top 3 news drivers.
+    4. View: Buy or Wait based on current context.
+    Limit to 6 bullets.
     """
-    
+
+    # --- ATTEMPT 1: LIVE WEB SEARCH ---
     try:
-        # Attempt Search-Grounded Response
+        search_prompt = base_prompt + "\nMandatory: Use Google Search for real-time 2026 data. Do not use internal memory for prices."
         response = client.models.generate_content(
             model=model_id,
-            contents=prompt,
+            contents=search_prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearchRetrieval())]
             )
         )
         return response.text
-        
+    
+    # --- ATTEMPT 2: FALLBACK (INTERNAL KNOWLEDGE) ---
     except Exception as e:
-        # Fallback Protocol: Label clearly as Internal Knowledge
-        try:
-            fallback_prompt = prompt + "\nNote: Websearch failed. Use internal knowledge but DO NOT provide specific current prices."
-            fallback_res = client.models.generate_content(model=model_id, contents=fallback_prompt)
-            return f"### ⚠️ INTERNAL KNOWLEDGE\n**Knowledge Cutoff: Late 2024/Early 2025**\n\n{fallback_res.text}"
-        except:
-            return f"AI Research Error: {str(e)}"
+        # Check if error is Rate Limit (429) or Service Unavailable
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            try:
+                fallback_prompt = f"""
+                {base_prompt}
+                
+                STRICT INSTRUCTIONS:
+                - Start with the header: '### ⚠️ INTERNAL KNOWLEDGE (Knowledge Cutoff: Late 2025)'
+                - Mention that live websearch is currently at capacity.
+                - Never provide a 'current' 2026 price; instead, discuss historical price ranges and core fundamentals.
+                """
+                
+                # Execute without the Search Tool
+                fallback_res = client.models.generate_content(
+                    model=model_id, 
+                    contents=fallback_prompt
+                )
+                return fallback_res.text
+            except Exception as fallback_err:
+                return f"Critical API Error: {str(fallback_err)}"
+        
+        return f"Research Error: {str(e)}"
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.7", layout="wide")
