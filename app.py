@@ -25,37 +25,48 @@ def bs_price(S, K, T, r, sigma):
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
 # --- AI RESEARCH ENGINE ---
-from google import genai  # Ensure this is the only google import
+from google import genai
+from google.genai import types
 
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key: 
-        return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
     
     try:
-        # Initialize the Modern 2026 Client
         client = genai.Client(api_key=api_key)
         
+        # We use the -preview suffix as required by the v1beta API in 2026
+        model_id = "gemini-3-flash-preview" 
+        
         prompt = f"""
-        Provide a factual, bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
-        - Analyst Consensus: Median price target vs current price.
-        - Key Dates: Next earnings date and any major upcoming catalysts.
-        - Recent Sentiment: Summary of top news drivers (last 14 days).
-        - Macro Context: How current inflation/rates affect this specific sector.
-        - Overall View: Should a trader 'Buy' or 'Wait' based on news/sentiment?
-        Format as a clean bulleted list. 8 bullets max. Do not hallucinate.
+        Factual bulleted cheat sheet for stock ticker {ticker} as of {datetime.now().date()}.
+        1. Analyst Consensus: Median price target vs current price.
+        2. Key Dates: Next earnings and major catalysts.
+        3. Recent Sentiment: Summary of top 3 news drivers (last 14 days).
+        4. Macro Context: Inflation/rate impact on this sector.
+        5. Overall View: 'Buy' or 'Wait' based on news sentiment.
         """
         
-        # Correct 2026 method call
         response = client.models.generate_content(
-            model="gemini-3-flash", 
-            contents=prompt
+            model=model_id,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                # Enable thinking for better reasoning on sentiment
+                thinking_config=types.ThinkingConfig(include_thoughts=False)
+            )
         )
-        
         return response.text
+        
     except Exception as e:
-        # If 'models' attribute error persists, it's likely a version mismatch
-        return f"AI Research Error: {str(e)}. Check if 'google-genai' is correctly installed in requirements.txt."
+        # Fallback to the stable 2.5 model if the 3-series preview is hitting a 404/quota
+        try:
+            fallback_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            return f"⚠️ (Using Fallback Model)\n\n{fallback_response.text}"
+        except:
+            return f"AI Research Error: {str(e)}"
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro v6.6", layout="wide")
