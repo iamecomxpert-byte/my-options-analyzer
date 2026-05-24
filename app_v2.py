@@ -120,7 +120,8 @@ if fetch_btn:
         else:
             st.session_state.hist_data = hist
             st.session_state.price = hist['Close'].iloc[-1]
-            st.session_state.stock_name = stock_obj.info.get('longName', ticker_input)
+            st.session_name = stock_obj.info.get('longName', ticker_input)
+            st.session_state.stock_name = st.session_name
             st.session_state.expiries = list(stock_obj.options)
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
@@ -265,7 +266,6 @@ if st.session_state.price and st.session_state.expiries:
             tier_contracts = []
             all_available_contracts = []
             
-            # Change 1: Track filtered candidates AND capture all chain listings for the selector dropdown
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
@@ -290,13 +290,11 @@ if st.session_state.price and st.session_state.expiries:
                 st.error("No valid options contracts returned from data stream for this expiry.")
                 return
 
-            # Determine baseline default drop-down item from tier filtered criteria
             if tier_contracts:
                 df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
                 default_strike = df_tier.iloc[0]['strike']
             else:
                 df_all_fallback = pd.DataFrame(all_available_contracts).sort_values(by='strike')
-                # Fallback directly to closest ATM if tier parameters return empty 
                 default_strike = df_all_fallback.iloc[(df_all_fallback['strike'] - S).abs().argsort()[:1]].iloc[0]['strike']
 
             df_all = pd.DataFrame(all_available_contracts)
@@ -305,7 +303,6 @@ if st.session_state.price and st.session_state.expiries:
             # Interactive Dropdown showing all strikes
             selected_k = st.selectbox(f"Select Alternative Strike to Inspect ({tier_label} Sandbox):", strike_list, index=strike_list.index(default_strike), key=f"sel_{tier_label}_{expiry}")
             
-            # Change 2: Re-bind active recommendations to match whichever custom strike choice is active
             chosen = df_all[df_all['strike'] == selected_k].iloc[0]
             chosen_exit = chosen['mid'] * (1 + profit_target_pct / 100)
             chosen_stop = chosen['mid'] * (1 - stop_loss_pct / 100)
@@ -337,29 +334,29 @@ if st.session_state.price and st.session_state.expiries:
             st.markdown("### 🔍 Mathematical Output Summary")
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
-                # Change 4: Map clean English definitions explaining what each status means
+                # Conviction Status Indicators with Embedded Definitions
                 if chosen['cts'] >= 55 and chosen['ev'] > 0:
                     st.success("✅ STRUCTURAL BUY INSTANCE")
                     st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
-                    <b>What this means:</b> The system sees a highly favorable trade setup. The chart trend, 
-                    probability of winning, and price entry are all aligned in your favor.
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                    <b>What this means in plain English:</b> The odds are highly in your favor. 
+                    The combination of healthy upward stock momentum, a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
                     </p>
                     """, unsafe_allow_html=True)
                 elif chosen['cts'] >= 40 and chosen['ev'] > 0:
                     st.warning("⚠️ WEAK EDGE PATTERN")
                     st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
-                    <b>What this means:</b> The setup has mathematical potential, but lacks full confirmation. 
-                    Some indicators or momentum conditions are conflicting. Proceed with cautious positioning.
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                    <b>What this means in plain English:</b> This option has a mathematical edge, but it is thin. 
+                    Some charts are flashing mixed signals, meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
                     </p>
                     """, unsafe_allow_html=True)
                 else:
                     st.error("❌ NEGATIVE EXPECTANCY AVOID")
                     st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
-                    <b>What this means:</b> The mathematical odds are stacked against this position. 
-                    The combination of steep premium pricing, weak momentum, or long distances to the strike price suggests an unfavorable risk-reward ratio.
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                    <b>What this means in plain English:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
+                    Statistically, playing these setups results in an outright loss over time.
                     </p>
                     """, unsafe_allow_html=True)
                     
@@ -373,7 +370,7 @@ if st.session_state.price and st.session_state.expiries:
 
             with c3:
                 st.write("**Stochastic Engine Outputs**")
-                st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`主力")
+                st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`")
                 st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{chosen['p_touch'] * 100:.1f}%`")
                 st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
                 st.write(f"- Volatility Index (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
@@ -450,24 +447,39 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
+    # Built out Strategy Guide Master Encyclopedia
     with t_edu:
-        st.subheader("📖 Technical Decoder & Playbook")
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.markdown("""
-            #### 📊 Momentum Decoder
-            * **Bullish Cross:** 8 EMA > 20 EMA. Short-term buyers are in control.
-            * **Bearish Separation:** 8 EMA < 20 EMA. The stock is in a downtrend; avoid entering new Call positions.
-            * **MACD Improving:** The histogram is rising (e.g., going from -2.0 to -1.5). This suggests a **reversal** or "buying the dip" opportunity.
-            * **MACD Fading:** Histogram is falling. Buyers are losing steam.
-            """)
-        with col_g2:
-            st.markdown("""
-            #### ⚖️ High-Conviction Checklist
-            - **Trend:** 20-Day SMA Bullish & 8 EMA > 20 EMA.
-            - **MACD:** Look for a green, rising histogram.
-            - **Bollinger:** Best entries occur when price bounces off the Middle Band (SMA 20).
-            - **Risk:** Always set exit alarms for stop-loss or profit booking.
-            """)
+        st.header("📖 System Strategy Guide & Indicator Dictionary")
+        st.markdown("Welcome to the complete manual documentation. Below is the full breakdown of how our metrics work, what they mean, and how to execute positions.")
+        
+        st.divider()
+        
+        st.subheader("🎯 Conviction Indicator Glossary")
+        st.markdown("""
+        When you select a contract inside the manual sandbox, the engine evaluates it against historical prices and probability matrices to assign a conviction state:
+        * **`STRUCTURAL BUY INSTANCE`**: High mathematical conviction. It implies that your chosen option benefits from an excellent trend, strong probability metrics, and favorable options pricing.
+        * **`WEAK EDGE PATTERN`**: Moderate caution. There is a statistical edge favoring a profitable outcome, but indicators are mixed. Position size should be scaled down to minimize exposure.
+        * **`NEGATIVE EXPECTANCY AVOID`**: Severe statistical disadvantage. Over a large sample size, playing this exact contract layout loses money due to excessive time decay, high overpricing, or bad trend health.
+        """)
+        
+        st.divider()
+        
+        st.subheader("📊 Stochastic Engine Glossary")
+        st.markdown("""
+        * **Delta Proxy ($P_{\\text{ITM}}$)**: Measures the theoretical probability that the option will expire deep inside the money. A Delta of `0.50` means a roughly 50% chance of expiring profitable.
+        * **Path Touch Probability ($P_{\\text{touch}}$)**: Calculates the mathematical probability that the stock price hits or crosses your strike price at least *once* during the life of the option. This is almost always double your raw Delta proxy.
+        * **Expected Valuation ($E[X]$)**: Represents your long-term expectancy. It calculates: `(Touch Probability × Target Take Profit Value) - (Loss Probability × Max Allowed Stop Loss Value)`. A positive number signifies a structurally sound trade layout.
+        * **Daily Theta**: The daily rent fee or time decay your option contract experiences. Every 24 hours that pass, the option premium drops by this exact amount, all else remaining equal.
+        * **Implied Volatility (IV)**: The market's expectation of future asset fluctuation. High IV indicates expensive option premiums, accelerating time decay.
+        """)
+        
+        st.divider()
+        
+        st.subheader("📈 Momentum Indicator Reference")
+        st.markdown("""
+        * **8 & 20 Day EMA Crossover**: Standard trend filter. When the fast 8 EMA stays above the slow 20 EMA, buyers control short-term swing momentum.
+        * **MACD Histogram**: Monitors acceleration. When the histogram expands upward, buying pressure is accelerating. When it shrinks, momentum is exhausting.
+        * **Bollinger Bands**: Volatility boundaries. The middle band represents the 20-day simple moving average baseline. Bounces off this line indicate healthy technical trend retention.
+        """)
 else:
     st.info("👈 Input a valid trading ticker to trigger the options matrix models.")
