@@ -7,6 +7,56 @@ import numpy as np
 from scipy.stats import norm
 from google import genai
 from google.genai import types
+import time
+import hashlib
+from datetime import datetime, timedelta
+
+# --- SIMPLE CACHE FOR AI RESPONSES ---
+class SimpleCache:
+    def __init__(self, ttl_seconds=300):  # 5 minute TTL
+        self.cache = {}
+        self.ttl = ttl_seconds
+    
+    def get(self, key):
+        if key in self.cache:
+            entry = self.cache[key]
+            if datetime.now() < entry['expires']:
+                return entry['data']
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key, value):
+        self.cache[key] = {
+            'data': value,
+            'expires': datetime.now() + timedelta(seconds=self.ttl)
+        }
+
+# --- GEMINI RETRY LOGIC ---
+def call_gemini_with_retry(client, model_id, prompt, max_retries=3, base_delay=2):
+    """Call Gemini with exponential backoff retry logic."""
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_id,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            error_str = str(e)
+            # Check if it's a rate limit error (429)
+            if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)  # 2, 4, 8 seconds
+                    st.warning(f"⏳ Gemini rate limit hit. Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return None  # All retries exhausted
+            else:
+                # Non-rate-limit error, don't retry
+                return None
+    return None
 
 # --- CORE MATH & OPTIONS QUANT ENGINES ---
 def calculate_greeks(S, K, T, r, sigma, type="call"):
@@ -51,7 +101,7 @@ def get_technicals(df):
     
     return df.iloc[-1], df.iloc[-2]
 
-# --- NEW: Fetch news from Yahoo Finance (no API limits!) ---
+# --- FETCH NEWS FROM YAHOO FINANCE (NO API LIMITS) ---
 def fetch_news_for_ticker(ticker):
     """Fetch latest news for a ticker using yfinance - completely free, no rate limits."""
     try:
@@ -75,11 +125,17 @@ def fetch_news_for_ticker(ticker):
         st.warning(f"Could not fetch news: {str(e)[:100]}")
         return None
 
-# --- AI RESEARCH ENGINE (Now using Yahoo Finance news + Gemini summarization) ---
+# --- AI RESEARCH ENGINE (Now with retry logic and caching) ---
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    
+    # Check cache first
+    cache_key = f"news_summary_{ticker}"
+    cached_response = st.session_state.ai_cache.get(cache_key)
+    if cached_response:
+        return cached_response
     
     # Fetch news using yfinance (free, no rate limits)
     news_articles = fetch_news_for_ticker(ticker)
@@ -113,17 +169,30 @@ def get_ai_research(ticker):
         client = genai.Client(api_key=api_key)
         model_id = "gemini-2.0-flash"
         
-        response = client.models.generate_content(
-            model=model_id,
-            contents=prompt
-        )
+        # Use retry logic
+        response_text = call_gemini_with_retry(client, model_id, prompt)
         
-        # Add source attribution
-        return f"### 📰 News Summary for {ticker}\n\n{response.text}\n\n---\n*📌 Sources: {len(news_articles)} recent news articles from Yahoo Finance*"
+        if response_text is None:
+            # Fallback: Show raw news without AI summary
+            fallback = f"### 📰 Recent News for {ticker}\n\n"
+            fallback += "*(AI summary temporarily unavailable due to rate limits. Here are the raw headlines:)*\n\n"
+            for i, item in enumerate(news_articles[:5]):
+                fallback += f"**{i+1}. {item['title']}**  \n"
+                fallback += f"📌 Source: {item['publisher']}  \n"
+                fallback += f"🔗 [Read more]({item['link']})  \n\n"
+            fallback += "---\n*💡 Tip: Click 'Refresh News' in 30-60 seconds to try AI summary again.*"
+            
+            result = fallback
+        else:
+            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n*📌 Sources: {len(news_articles)} recent news articles from Yahoo Finance*"
+        
+        # Cache the result
+        st.session_state.ai_cache.set(cache_key, result)
+        return result
         
     except Exception as e:
         if "429" in str(e):
-            return "❌ **Gemini API rate limited.** Please wait 60 seconds and try again."
+            return f"❌ **Gemini API rate limit.** \n\nShowing raw news instead:\n\n" + "\n".join([f"- {item['title']} ({item['publisher']})" for item in news_articles[:5]])
         return f"❌ **AI Summary Failed.** Error: {str(e)[:100]}"
 
 # --- PAGE CONFIG & SESSION STATE ---
@@ -133,11 +202,16 @@ state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
-    'global_conservative': None, 'global_aggressive': None, 'global_speculative': None
+    'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
+    'ai_cache': None  # Will be initialized below
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# Initialize AI cache
+if st.session_state.ai_cache is None:
+    st.session_state.ai_cache = SimpleCache()
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -482,14 +556,17 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
-    # --- MODIFIED AI RESEARCH TAB (Now uses Yahoo Finance news, not Google Search) ---
+    # --- AI RESEARCH TAB (Now with retry logic and caching) ---
     with t_ai:
         c1, c2 = st.columns([4, 1])
         with c1: 
             st.subheader(f"📰 News & AI Analysis: {st.session_state.current_ticker}")
-            st.caption("Powered by Yahoo Finance news + Gemini AI summarization (no rate limits)")
+            st.caption("Powered by Yahoo Finance news + Gemini AI (auto-retry on rate limits)")
         with c2:
             if st.button("🔄 Refresh News", use_container_width=True):
+                # Clear cache for this ticker on manual refresh
+                cache_key = f"news_summary_{st.session_state.current_ticker}"
+                st.session_state.ai_cache.cache.pop(cache_key, None)
                 st.session_state.ai_brief = ""
                 st.rerun()
         
