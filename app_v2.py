@@ -5,10 +5,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import numpy as np
 from scipy.stats import norm
-from google import genai
-from google.genai import types
+from groq import Groq
 import time
-import hashlib
 from datetime import datetime, timedelta
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
@@ -32,23 +30,28 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
-# --- GEMINI RETRY LOGIC ---
-def call_gemini_with_retry(client, model_id, prompt, max_retries=3, base_delay=2):
-    """Call Gemini with exponential backoff retry logic."""
+# --- GROQ RETRY LOGIC ---
+def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
+    """Call Groq with exponential backoff retry logic."""
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=prompt
+            response = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a financial analyst specializing in stock market news summarization."},
+                    {"role": "user", "content": prompt}
+                ],
+                model="llama-3.3-70b-versatile",  # 30 req/min, high quality
+                max_tokens=600,
+                temperature=0.3,  # Lower temp for factual consistency
             )
-            return response.text
+            return response.choices[0].message.content
         except Exception as e:
             error_str = str(e)
-            # Check if it's a rate limit error (429)
+            # Check if it's a rate limit error
             if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
                 if attempt < max_retries - 1:
                     wait_time = base_delay * (2 ** attempt)  # 2, 4, 8 seconds
-                    st.warning(f"⏳ Gemini rate limit hit. Waiting {wait_time} seconds before retry...")
+                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -101,35 +104,63 @@ def get_technicals(df):
     
     return df.iloc[-1], df.iloc[-2]
 
-# --- FETCH NEWS FROM YAHOO FINANCE (NO API LIMITS) ---
-def fetch_news_for_ticker(ticker):
-    """Fetch latest news for a ticker using yfinance - completely free, no rate limits."""
+# --- FETCH NEWS FROM FINNHUB (RELIABLE, WORKING LINKS) ---
+def fetch_news_finnhub(ticker):
+    """Fetch latest news for a ticker using Finnhub API - working links guaranteed."""
+    api_key = st.secrets.get("FINNHUB_API_KEY")
+    if not api_key:
+        st.warning("⚠️ FINNHUB_API_KEY not found in secrets. News will be unavailable.")
+        return None
+    
     try:
-        stock = yf.Ticker(ticker)
-        news_list = stock.news
+        # Get news from last 7 days
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=7)
         
-        if not news_list:
+        url = "https://finnhub.io/api/v1/company-news"
+        params = {
+            'symbol': ticker,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'token': api_key
+        }
+        
+        response = requests.get(url, params=params)
+        
+        if response.status_code != 200:
+            st.warning(f"Finnhub API error: {response.status_code}")
             return None
         
-        # Get up to 8 most recent news articles
+        articles = response.json()
+        
+        if not articles:
+            return None
+        
+        # Format articles with proper fields
         formatted_news = []
-        for item in news_list[:8]:
+        for item in articles[:8]:  # Get up to 8 most recent
             formatted_news.append({
-                'title': item.get('title', 'No title'),
-                'link': item.get('link', '#'),
-                'publisher': item.get('publisher', 'Unknown'),
-                'providerPublishTime': item.get('providerPublishTime', '')
+                'title': item.get('headline', 'No title'),
+                'link': item.get('url', '#'),
+                'publisher': item.get('source', 'Unknown'),
+                'datetime': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d %H:%M'),
+                'summary': item.get('summary', '')[:200]  # Preview text
             })
         return formatted_news
     except Exception as e:
         st.warning(f"Could not fetch news: {str(e)[:100]}")
         return None
 
-# --- AI RESEARCH ENGINE (Now with retry logic and caching) ---
+# --- AI RESEARCH ENGINE (Finnhub News + Groq AI) ---
 def get_ai_research(ticker):
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    groq_api_key = st.secrets.get("GROQ_API_KEY")
+    finnhub_api_key = st.secrets.get("FINNHUB_API_KEY")
+    
+    if not groq_api_key:
+        return "⚠️ Please add GROQ_API_KEY to Streamlit Secrets."
+    
+    if not finnhub_api_key:
+        return "⚠️ Please add FINNHUB_API_KEY to Streamlit Secrets."
     
     # Check cache first
     cache_key = f"news_summary_{ticker}"
@@ -137,20 +168,23 @@ def get_ai_research(ticker):
     if cached_response:
         return cached_response
     
-    # Fetch news using yfinance (free, no rate limits)
-    news_articles = fetch_news_for_ticker(ticker)
+    # Fetch news using Finnhub
+    news_articles = fetch_news_finnhub(ticker)
     
     if not news_articles:
-        return f"ℹ️ No recent news found for {ticker}. The stock may have low coverage or the ticker is invalid."
+        return f"ℹ️ No recent news found for {ticker} in the last 7 days."
     
-    # Format news for Gemini prompt
+    # Format news for Groq prompt
     news_text = "\n\n".join([
-        f"**News {i+1}** (Source: {item['publisher']})\nTitle: {item['title']}\nLink: {item['link']}"
+        f"**News {i+1}** (Source: {item['publisher']}, Time: {item['datetime']})\n"
+        f"Title: {item['title']}\n"
+        f"Summary: {item['summary']}\n"
+        f"Link: {item['link']}"
         for i, item in enumerate(news_articles)
     ])
     
     prompt = f"""
-    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker}.
+    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker} from the last 7 days.
     
     NEWS ARTICLES:
     {news_text}
@@ -166,11 +200,10 @@ def get_ai_research(ticker):
     """
     
     try:
-        client = genai.Client(api_key=api_key)
-        model_id = "gemini-2.0-flash"
+        client = Groq(api_key=groq_api_key)
         
         # Use retry logic
-        response_text = call_gemini_with_retry(client, model_id, prompt)
+        response_text = call_groq_with_retry(client, prompt)
         
         if response_text is None:
             # Fallback: Show raw news without AI summary
@@ -178,22 +211,29 @@ def get_ai_research(ticker):
             fallback += "*(AI summary temporarily unavailable due to rate limits. Here are the raw headlines:)*\n\n"
             for i, item in enumerate(news_articles[:5]):
                 fallback += f"**{i+1}. {item['title']}**  \n"
-                fallback += f"📌 Source: {item['publisher']}  \n"
-                fallback += f"🔗 [Read more]({item['link']})  \n\n"
+                fallback += f"📌 Source: {item['publisher']} | 🕐 {item['datetime']}  \n"
+                fallback += f"🔗 [Read full article]({item['link']})  \n\n"
             fallback += "---\n*💡 Tip: Click 'Refresh News' in 30-60 seconds to try AI summary again.*"
             
             result = fallback
         else:
-            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n*📌 Sources: {len(news_articles)} recent news articles from Yahoo Finance*"
+            # Add sources section
+            sources_text = "\n".join([f"- [{item['title']}]({item['link']}) ({item['publisher']})" for item in news_articles[:5]])
+            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n### 🔗 Sources\n{sources_text}\n\n*📌 Data provided by Finnhub.io*"
         
         # Cache the result
         st.session_state.ai_cache.set(cache_key, result)
         return result
         
     except Exception as e:
-        if "429" in str(e):
-            return f"❌ **Gemini API rate limit.** \n\nShowing raw news instead:\n\n" + "\n".join([f"- {item['title']} ({item['publisher']})" for item in news_articles[:5]])
-        return f"❌ **AI Summary Failed.** Error: {str(e)[:100]}"
+        # Ultimate fallback: just show raw news
+        fallback = f"### 📰 Recent News for {ticker}\n\n"
+        fallback += "*(AI service unavailable. Here are the latest headlines:)*\n\n"
+        for i, item in enumerate(news_articles[:5]):
+            fallback += f"**{i+1}. {item['title']}**  \n"
+            fallback += f"📌 {item['publisher']} | 🕐 {item['datetime']}  \n"
+            fallback += f"🔗 [Read full article]({item['link']})  \n\n"
+        return fallback
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
@@ -556,17 +596,18 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
-    # --- AI RESEARCH TAB (Now with retry logic and caching) ---
+    # --- AI RESEARCH TAB (Now with Finnhub news + Groq AI) ---
     with t_ai:
         c1, c2 = st.columns([4, 1])
         with c1: 
             st.subheader(f"📰 News & AI Analysis: {st.session_state.current_ticker}")
-            st.caption("Powered by Yahoo Finance news + Gemini AI (auto-retry on rate limits)")
+            st.caption("Powered by Finnhub news + Groq Llama 3.3 70B (auto-retry on rate limits)")
         with c2:
             if st.button("🔄 Refresh News", use_container_width=True):
                 # Clear cache for this ticker on manual refresh
                 cache_key = f"news_summary_{st.session_state.current_ticker}"
-                st.session_state.ai_cache.cache.pop(cache_key, None)
+                if cache_key in st.session_state.ai_cache.cache:
+                    del st.session_state.ai_cache.cache[cache_key]
                 st.session_state.ai_brief = ""
                 st.rerun()
         
