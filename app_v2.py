@@ -228,7 +228,7 @@ if st.session_state.price and st.session_state.expiries:
                 </table>
             </div>
             """
-            st.markdown(box_html, unsafe_allowed_html=True)
+            st.markdown(box_html, unsafe_allow_html=True)
             
             st.divider()
             
