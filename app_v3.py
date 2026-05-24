@@ -16,7 +16,7 @@ st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
-    def __init__(self, ttl_seconds=300):  # 5 minute TTL
+    def __init__(self, ttl_seconds=300):
         self.cache = {}
         self.ttl = ttl_seconds
     
@@ -38,25 +38,14 @@ class SimpleCache:
 # --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
 def get_google_sheet():
-    """Connect to Google Sheets using service account credentials."""
     try:
-        # Load credentials from secrets (JSON string)
         creds_json = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
         creds_dict = json.loads(creds_json)
-        
-        # Define the scope
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        
-        # Create credentials object
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        
-        # Connect to Google Sheets
         client = gspread.authorize(creds)
-        
-        # Open the spreadsheet by ID
         sheet_id = st.secrets["SPREADSHEET_ID"]
         sheet = client.open_by_key(sheet_id)
-        
         return sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {str(e)}")
@@ -64,83 +53,78 @@ def get_google_sheet():
 
 # --- PORTFOLIO FUNCTIONS ---
 def init_portfolio_sheet():
-    """Initialize the portfolio sheet if it doesn't exist."""
     sheet = get_google_sheet()
     if not sheet:
         return None
-    
     try:
-        # Try to get the Portfolio worksheet
         worksheet = sheet.worksheet("Portfolio")
     except:
-        # Create it if it doesn't exist
         worksheet = sheet.add_worksheet(title="Portfolio", rows="1000", cols="20")
-        
-        # Add headers
         headers = [
             "timestamp", "trader_name", "ticker", "strike", "expiry", 
             "contracts", "entry_price", "target_price", "stop_loss", "cutoff_date",
             "entry_iv", "entry_delta", "status", "last_recommendation", "last_alert_sent"
         ]
         worksheet.append_row(headers)
-    
     return worksheet
 
 def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_price, 
                           entry_iv, entry_delta, target_price, stop_loss, cutoff_date):
-    """Add a new position to Google Sheets."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return False
-    
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     row = [
         now, trader_name, ticker, strike, expiry, contracts, entry_price,
         target_price, stop_loss, cutoff_date, entry_iv, entry_delta,
         "active", "HOLD", ""
     ]
-    
     worksheet.append_row(row)
     return True
 
 def get_portfolio_positions(trader_name=None):
-    """Get all portfolio positions, optionally filtered by trader name."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return []
-    
     records = worksheet.get_all_records()
     positions = []
-    
-    for record in records:
+    for idx, record in enumerate(records):
         if record.get("status") == "active":
             if trader_name and record.get("trader_name") != trader_name:
                 continue
-            positions.append(record)
-    
+            positions.append((idx, record))
     return positions
 
-def update_position_recommendation(row_index, recommendation):
-    """Update the last_recommendation for a position."""
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
-        return
-    
-    # Find the row by index (add 2 because of 1-indexing and header row)
-    worksheet.update_cell(row_index + 2, 14, recommendation)  # Column 14 = last_recommendation
-
 def close_position(row_index):
-    """Mark a position as closed."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return
+    worksheet.update_cell(row_index + 2, 13, "closed")
+
+def get_position_recommendation(position, current_price, current_iv, current_delta, days_left):
+    entry = float(position['entry_price'])
+    current = current_price
+    target = float(position['target_price'])
+    stop = float(position['stop_loss'])
     
-    worksheet.update_cell(row_index + 2, 13, "closed")  # Column 13 = status
+    pnl_pct = ((current - entry) / entry) * 100
+    
+    if current <= stop:
+        return "🔴 SELL IMMEDIATELY", f"Stop loss hit at ${stop:.2f}"
+    if current >= target:
+        return "🟢 TAKE PROFIT", f"Target reached at ${target:.2f}"
+    if current >= target * 0.8:
+        return "🟡 PARTIAL PROFIT", f"80% of target reached. Consider taking partial profits."
+    if days_left < 7:
+        return "🟠 EXIT SOON", f"Only {days_left} days left. Time decay accelerating."
+    if current_delta < 0.25:
+        return "🟠 EXIT", f"Delta dropped to {current_delta:.2f}. Probability decreased."
+    if pnl_pct > 0 and pnl_pct < 20 and current_delta > 0.45:
+        return "🟢 ADD MORE", f"Position is working. Consider adding at ${current:.2f}"
+    return "🔵 HOLD", f"Target: ${target:.2f}, Stop: ${stop:.2f}"
 
 # --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
-    """Call Groq with exponential backoff retry logic."""
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -158,7 +142,7 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
             if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
                 if attempt < max_retries - 1:
                     wait_time = base_delay * (2 ** attempt)
-                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds before retry...")
+                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds...")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -179,7 +163,6 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
 
 def calculate_p_touch(S, K, T, sigma):
-    """Calculates the probability of touching the strike price before expiration."""
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
     d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     p_itm = norm.cdf(d1) if S < K else 1.0 - norm.cdf(d1)
@@ -190,31 +173,25 @@ def calculate_p_touch(S, K, T, sigma):
 def get_technicals(df):
     df['ema8'] = df['Close'].ewm(span=8, adjust=False).mean()
     df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema12 - ema26
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
-    
     df['sma20'] = df['Close'].rolling(window=20).mean()
     df['std20'] = df['Close'].rolling(window=20).std()
     df['upper'] = df['sma20'] + (df['std20'] * 2)
     df['lower'] = df['sma20'] - (df['std20'] * 2)
-    
     return df.iloc[-1], df.iloc[-2]
 
 # --- FETCH NEWS FROM FINNHUB ---
 def fetch_news_finnhub(ticker):
-    """Fetch latest news for a ticker using Finnhub API."""
     api_key = st.secrets.get("FINNHUB_API_KEY")
     if not api_key:
         return None
-    
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=7)
-        
         url = "https://finnhub.io/api/v1/company-news"
         params = {
             'symbol': ticker,
@@ -222,17 +199,12 @@ def fetch_news_finnhub(ticker):
             'to': end_date.strftime('%Y-%m-%d'),
             'token': api_key
         }
-        
         response = requests.get(url, params=params)
-        
         if response.status_code != 200:
             return None
-        
         articles = response.json()
-        
         if not articles:
             return None
-        
         formatted_news = []
         for item in articles[:8]:
             formatted_news.append({
@@ -249,107 +221,44 @@ def fetch_news_finnhub(ticker):
 # --- AI RESEARCH ENGINE ---
 def get_ai_research(ticker):
     groq_api_key = st.secrets.get("GROQ_API_KEY")
-    finnhub_api_key = st.secrets.get("FINNHUB_API_KEY")
-    
-    if not groq_api_key:
-        return "⚠️ Please add GROQ_API_KEY to Streamlit Secrets."
-    
     cache_key = f"news_summary_{ticker}"
     cached_response = st.session_state.ai_cache.get(cache_key)
     if cached_response:
         return cached_response
-    
     news_articles = fetch_news_finnhub(ticker)
-    
     if not news_articles:
-        return f"ℹ️ No recent news found for {ticker} in the last 7 days."
-    
+        return f"ℹ️ No recent news found for {ticker}"
     news_text = "\n\n".join([
         f"**News {i+1}** (Source: {item['publisher']}, Time: {item['datetime']})\n"
         f"Title: {item['title']}\n"
-        f"Summary: {item['summary']}\n"
-        f"Link: {item['link']}"
+        f"Summary: {item['summary']}"
         for i, item in enumerate(news_articles)
     ])
-    
     prompt = f"""
-    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker} from the last 7 days.
+    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker}.
     
     NEWS ARTICLES:
     {news_text}
     
     Based ONLY on these news articles, provide a concise analysis:
-    
-    1. **Analyst Consensus**: What are analysts saying?
-    2. **Key Catalysts**: Upcoming events, earnings dates mentioned
-    3. **Sentiment Drivers**: Top 3 themes from the last 7 days
-    4. **Actionable View**: Give a "Bullish", "Neutral", or "Cautious" rating with 1-sentence reasoning
-    
-    Keep it factual and concise.
+    1. **Analyst Consensus**
+    2. **Key Catalysts**
+    3. **Sentiment Drivers**
+    4. **Actionable View** (Bullish/Neutral/Cautious)
     """
-    
     try:
         client = Groq(api_key=groq_api_key)
         response_text = call_groq_with_retry(client, prompt)
-        
         if response_text is None:
-            fallback = f"### 📰 Recent News for {ticker}\n\n"
+            result = f"### 📰 Recent News for {ticker}\n\n"
             for i, item in enumerate(news_articles[:5]):
-                fallback += f"**{i+1}. {item['title']}**  \n"
-                fallback += f"📌 Source: {item['publisher']} | 🕐 {item['datetime']}  \n"
-                fallback += f"🔗 [Read full article]({item['link']})  \n\n"
-            result = fallback
+                result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']}\n\n"
         else:
-            sources_text = "\n".join([f"- [{item['title']}]({item['link']}) ({item['publisher']})" for item in news_articles[:5]])
-            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n### 🔗 Sources\n{sources_text}"
-        
+            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}"
         st.session_state.ai_cache.set(cache_key, result)
         return result
-        
     except Exception as e:
-        fallback = f"### 📰 Recent News for {ticker}\n\n"
-        for i, item in enumerate(news_articles[:5]):
-            fallback += f"**{i+1}. {item['title']}**  \n"
-            fallback += f"📌 {item['publisher']} | 🕐 {item['datetime']}  \n"
-            fallback += f"🔗 [Read full article]({item['link']})  \n\n"
-        return fallback
-
-# --- PORTFOLIO RECOMMENDATION ENGINE ---
-def get_position_recommendation(position, current_price, current_iv, current_delta, days_left):
-    """Generate recommendation for a single position."""
-    entry = float(position['entry_price'])
-    current = current_price
-    target = float(position['target_price'])
-    stop = float(position['stop_loss'])
-    
-    pnl_pct = ((current - entry) / entry) * 100
-    
-    # Check stop loss first
-    if current <= stop:
-        return "🔴 SELL IMMEDIATELY", f"Stop loss hit at ${stop:.2f} (Entry: ${entry:.2f})"
-    
-    # Check profit target
-    if current >= target:
-        return "🟢 TAKE PROFIT", f"Target reached at ${target:.2f} (Entry: ${entry:.2f})"
-    
-    # Check partial profit (80% of target)
-    if current >= target * 0.8:
-        return "🟡 PARTIAL PROFIT", f"80% of target reached. Consider taking partial profits."
-    
-    # Check days left
-    if days_left < 7:
-        return "🟠 EXIT SOON", f"Only {days_left} days left. Time decay accelerating."
-    
-    # Check if edge is still positive
-    if current_delta < 0.25:
-        return "🟠 EXIT", f"Delta dropped to {current_delta:.2f}. Probability decreased."
-    
-    # Check if we should add more
-    if pnl_pct > 0 and pnl_pct < 20 and current_delta > 0.45:
-        return "🟢 ADD MORE", f"Position is working. Consider adding at ${current:.2f}"
-    
-    # Default hold
-    return "🔵 HOLD", f"Position intact. Target: ${target:.2f}, Stop: ${stop:.2f}"
+        return f"News unavailable"
 
 # --- SESSION STATE INITIALIZATION ---
 state_keys = {
@@ -378,7 +287,7 @@ with st.sidebar:
     st.session_state.profit_target_pct = profit_target_pct
     st.session_state.stop_loss_pct = stop_loss_pct
 
-# --- DATA FETCHING & GLOBAL SCANS (Same as before) ---
+# --- DATA FETCHING & GLOBAL SCANS ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
     st.session_state.ai_brief = "" 
@@ -464,75 +373,215 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Updated tabs to include Portfolio
+    # Sidebar expiry selector (this stays!)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Workspace Adjuster")
+    expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
+    days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
+    T_years = max(days_to_expiry, 1) / 365
+
+    if days_to_expiry < 60:
+        st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework.")
+
+    # Fetch Call Chain Options for selected expiry
+    chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
+    
+    # Recalculate tech variables
+    tech_score = 0
+    verdict_reasons = []
+    if not st.session_state.hist_data.empty:
+        df_tech = st.session_state.hist_data.copy()
+        curr, prev = get_technicals(df_tech)
+        if curr['ema8'] > curr['ema20']:
+            tech_score += 1
+            verdict_reasons.append("Short-term momentum (8 EMA) is leading.")
+        if curr['hist'] > prev['hist']:
+            tech_score += 1
+            verdict_reasons.append("MACD histogram is rising.")
+        if S > curr['sma20']:
+            tech_score += 1
+            verdict_reasons.append("Price is above 20-day baseline.")
+
+    # --- THE STRATEGY PROCESSING FUNCTION (FULLY RESTORED) ---
+    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
+        with tab_component:
+            all_available_contracts = []
+            tier_contracts = []
+            
+            for index, row in chain.iterrows():
+                mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                if mid <= 0 or row['impliedVolatility'] <= 0: continue
+                
+                volume = row.get('volume', 0)
+                open_interest = row.get('openInterest', 0)
+                bid = row.get('bid', 0)
+                ask = row.get('ask', 0)
+                spread = (ask - bid) if ask > 0 and bid > 0 else 0
+                spread_pct = (spread / mid) * 100 if mid > 0 else 100
+                
+                d, g, t, v = calculate_greeks(S, row['strike'], T_years, 0.05, row['impliedVolatility'])
+                p_touch = calculate_p_touch(S, row['strike'], T_years, row['impliedVolatility'])
+                pot_profit = mid * (1 + profit_target_pct / 100)
+                pot_loss = mid * (stop_loss_pct / 100)
+                ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
+                cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
+                
+                if volume < 10:
+                    liquidity_status = "🔴 EXTREMELY ILLIQUID"
+                elif volume < 50:
+                    liquidity_status = "🟠 LOW LIQUIDITY"
+                elif volume < 200:
+                    liquidity_status = "🟡 MODERATE LIQUIDITY"
+                else:
+                    liquidity_status = "🟢 HIGHLY LIQUID"
+                
+                item = {
+                    'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
+                    'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 
+                    'symbol': row['contractSymbol'], 'volume': volume, 'open_interest': open_interest,
+                    'bid': bid, 'ask': ask, 'spread': spread, 'spread_pct': spread_pct,
+                    'liquidity_status': liquidity_status
+                }
+                
+                all_available_contracts.append(item)
+                if delta_min <= d <= delta_max:
+                    tier_contracts.append(item)
+            
+            if not all_available_contracts:
+                st.error("No valid options contracts returned.")
+                return
+
+            if tier_contracts:
+                best_contract = max(tier_contracts, key=lambda x: x['ev'])
+            else:
+                target_delta = (delta_min + delta_max) / 2
+                best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
+            
+            # LOCKED RECOMMENDATION
+            st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
+            if best_contract['volume'] < 50:
+                st.warning(f"{best_contract['liquidity_status']}: Low volume - exercise caution")
+            
+            reco_exit = best_contract['mid'] * (1 + profit_target_pct / 100)
+            reco_stop = best_contract['mid'] * (1 - stop_loss_pct / 100)
+            reco_hold = min(int(days_to_expiry * 0.4), 45)
+            reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
+            
+            st.markdown(f"""
+            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1);">
+                <h4 style="margin-top:0;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
+                <table style="width:100%;">
+                    <tr><td><b>Composite Score:</b></td><td>{best_contract['cts']}/100</td>
+                        <td><b>Entry:</b></td><td>${best_contract['mid']:.2f}</td></tr>
+                    <tr><td><b>Target:</b></td><td>${reco_exit:.2f}</td>
+                        <td><b>Stop:</b></td><td>${reco_stop:.2f}</td></tr>
+                    <tr><td><b>Hold Limit:</b></td><td>{reco_hold} Days</td>
+                        <td><b>Cutoff:</b></td><td>{reco_date}</td></tr>
+                    <tr><td><b>Volume:</b></td><td>{best_contract['volume']:,}</td>
+                        <td><b>OI:</b></td><td>{best_contract['open_interest']:,}</td></tr>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # COMPARISON SECTION
+            st.markdown("### 🔍 Compare Other Strikes")
+            strike_list = sorted([item['strike'] for item in all_available_contracts])
+            default_index = strike_list.index(best_contract['strike'])
+            
+            selected_k = st.selectbox(f"Select Strike to Compare:", strike_list, index=default_index, key=f"compare_{tier_label}")
+            selected = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            
+            if selected:
+                selected_exit = selected['mid'] * (1 + profit_target_pct / 100)
+                selected_stop = selected['mid'] * (1 - stop_loss_pct / 100)
+                
+                st.markdown("### 📊 Mathematical Output Summary")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Composite Score", f"{selected['cts']}/100")
+                    st.metric("Entry", f"${selected['mid']:.2f}")
+                with col2:
+                    st.metric("Target", f"${selected_exit:.2f}")
+                    st.metric("Stop", f"${selected_stop:.2f}")
+                with col3:
+                    st.metric("Volume", f"{selected['volume']:,}")
+                    st.metric("OI", f"{selected['open_interest']:,}")
+                
+                st.write("**Greeks:**")
+                st.write(f"Delta: {selected['delta']:.3f} | Theta: {selected['theta']:.3f} | Vega: {selected['vega']:.3f}")
+                st.write(f"Touch Prob: {selected['p_touch']*100:.1f}% | EV: {selected['ev']:.3f}")
+                
+                # Price chart
+                try:
+                    h_chart = yf.Ticker(selected['symbol']).history(period="1mo")
+                    if not h_chart.empty:
+                        st.caption("📈 Price History (30 days)")
+                        st.line_chart(h_chart['Close'])
+                        if 'Volume' in h_chart.columns:
+                            st.caption("📊 Volume (30 days)")
+                            st.bar_chart(h_chart['Volume'])
+                except:
+                    pass
+
+    # TABS
     t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
         "📋 Global Recs", "🛡️ Conservative", "⚡ Aggressive", 
         "🎰 Speculative", "📊 Technical", "🤖 AI Research", "📂 Portfolio", "📖 Strategy Guide"
     ])
 
-    # --- SUMMARY TAB (Keep your existing code) ---
+    # --- GLOBAL RECS TAB ---
     with t_summary:
         st.subheader("🏁 Automated Quantitative Trading Dashboard")
-        st.markdown("Mathematically optimal contracts with >= 60 days expiry")
-        
         sum_data = []
         profiles = [
             ("🛡️ Conservative", st.session_state.global_conservative, "50-60%"),
             ("⚡ Aggressive", st.session_state.global_aggressive, "40-49%"),
             ("🎰 Speculative", st.session_state.global_speculative, "30-39%")
         ]
-        
         for name, profile, target_d in profiles:
             if profile:
                 t_exit = profile['mid'] * (1 + profit_target_pct / 100)
                 s_loss = profile['mid'] * (1 - stop_loss_pct / 100)
                 h_days = min(int(profile['days'] * 0.4), 45)
-                h_date = (datetime.now() + timedelta(days=h_days)).strftime('%b %d, %Y')
-                
                 sum_data.append({
-                    "Strategy": name,
-                    "Target Delta": target_d,
-                    "Strike": f"${profile['strike']:.2f} Call",
-                    "Expiry": profile['expiry'],
-                    "Entry": f"${profile['mid']:.2f}",
-                    "Target": f"${t_exit:.2f}",
-                    "Stop": f"${s_loss:.2f}",
-                    "Score": f"{profile['cts']}/100"
+                    "Strategy": name, "Delta": target_d, "Strike": f"${profile['strike']:.2f}",
+                    "Expiry": profile['expiry'], "Entry": f"${profile['mid']:.2f}",
+                    "Target": f"${t_exit:.2f}", "Score": f"{profile['cts']}/100"
                 })
-        
         if sum_data:
             st.dataframe(pd.DataFrame(sum_data), use_container_width=True)
-        else:
-            st.warning("No contracts met the criteria.")
 
-    # --- STRATEGY TABS (Placeholders - keep your existing implementation) ---
-    with t_cons:
-        st.info("Conservative strategy details - select expiry from sidebar")
-        # Your existing conservative logic here
-    
-    with t_aggr:
-        st.info("Aggressive strategy details - select expiry from sidebar")
-    
-    with t_spec:
-        st.info("Speculative strategy details - select expiry from sidebar")
-    
+    # --- STRATEGY TABS (Restored) ---
+    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
+    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
+    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
+
+    # --- TECHNICAL TAB ---
     with t_tech:
         if not st.session_state.hist_data.empty:
-            st.subheader("Momentum & Volatility Health")
+            st.subheader("Technical Indicators")
             st.line_chart(st.session_state.hist_data[['Close']])
-        else:
-            st.info("Technical analysis available after fetching data")
-    
+            if tech_score == 3:
+                st.success("✅ BULLISH - All indicators aligned")
+            elif tech_score == 2:
+                st.warning("⚠️ MIXED - Exercise caution")
+            else:
+                st.error("❌ BEARISH - Avoid calls")
+
+    # --- AI RESEARCH TAB ---
     with t_ai:
+        if st.button("🔄 Refresh AI Analysis"):
+            st.session_state.ai_brief = ""
+            st.rerun()
         if not st.session_state.ai_brief:
             with st.spinner("Fetching AI analysis..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
-    # ========================
-    # NEW PORTFOLIO TAB
-    # ========================
-        # --- PORTFOLIO TAB (UPDATED) ---
+    # --- PORTFOLIO TAB ---
+        # --- PORTFOLIO TAB (UPDATED WITH ERROR HANDLING) ---
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
         
@@ -551,7 +600,6 @@ if st.session_state.price and st.session_state.expiries:
             for record in records:
                 if record.get('trader_name'):
                     traders.add(record['trader_name'])
-            # Add default if empty
             if not traders:
                 traders = {"Trader 1", "Trader 2", "Trader 3"}
             return sorted(list(traders))
@@ -638,7 +686,6 @@ if st.session_state.price and st.session_state.expiries:
                                      delta=f"{pnl_pct:+.1f}%", 
                                      delta_color="normal")
                             
-                            # Show P&L in dollars
                             if pnl >= 0:
                                 st.caption(f"💰 P&L: +${pnl:.0f}")
                             else:
@@ -648,7 +695,6 @@ if st.session_state.price and st.session_state.expiries:
                                 pos, current_price, current_iv, current_delta, days_left
                             )
                             
-                            # Color-coded recommendation
                             if "SELL" in recommendation or "EXIT" in recommendation:
                                 st.error(f"**{recommendation}**")
                             elif "PROFIT" in recommendation:
@@ -671,18 +717,26 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # --- ADD NEW POSITION (Auto-populated from sidebar!) ---
+        # --- ADD NEW POSITION (Safe auto-population) ---
         st.subheader("➕ Add New Position")
-        st.caption(f"Auto-filled from sidebar: Ticker = {st.session_state.current_ticker}, Selected Expiry = {expiry}")
+        
+        # Safely get the current ticker and expiry from session state or sidebar
+        current_ticker = st.session_state.get('current_ticker', 'SHOP')
+        # Check if expiry variable exists (it's defined after data fetch)
+        try:
+            current_expiry = expiry if 'expiry' in dir() else st.session_state.get('selected_expiry', datetime.now().date() + timedelta(days=60))
+        except:
+            current_expiry = datetime.now().date() + timedelta(days=60)
+        
+        st.caption(f"💡 Auto-filled from sidebar: Ticker = {current_ticker} | Selected Expiry = {current_expiry}")
         
         with st.form("add_position_form"):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                # Auto-populate ticker from sidebar, but allow override
                 ticker_pos = st.text_input(
                     "Ticker:", 
-                    value=st.session_state.current_ticker if st.session_state.current_ticker else "SHOP",
+                    value=current_ticker,
                     help="Auto-filled from sidebar. Change if needed."
                 ).upper()
                 
@@ -695,11 +749,14 @@ if st.session_state.price and st.session_state.expiries:
                 )
             
             with col2:
-                # Auto-populate expiry from sidebar
-                default_expiry = expiry if 'expiry' in dir() else datetime.now().date() + timedelta(days=60)
+                # Default expiry value
+                default_expiry = current_expiry if isinstance(current_expiry, (datetime, pd.Timestamp)) else datetime.now().date() + timedelta(days=60)
+                if isinstance(default_expiry, pd.Timestamp):
+                    default_expiry = default_expiry.date()
+                
                 expiry_pos = st.date_input(
                     "Expiry Date:", 
-                    value=pd.to_datetime(expiry).date() if 'expiry' in dir() else default_expiry,
+                    value=default_expiry,
                     min_value=datetime.now().date(),
                     help="Auto-filled from sidebar. Change if needed."
                 )
@@ -720,21 +777,21 @@ if st.session_state.price and st.session_state.expiries:
                     help="The price you paid per contract"
                 )
                 
-                # Auto-calculate targets based on current adjusters
+                # Auto-calculate targets
                 target_auto = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
                 stop_auto = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
                 
                 st.info(f"""
-                **Auto-calculated targets:**
-                - Target: ${target_auto:.2f} ({st.session_state.profit_target_pct}% above entry)
-                - Stop: ${stop_auto:.2f} ({st.session_state.stop_loss_pct}% below entry)
+                **Auto-calculated:**
+                - Target: ${target_auto:.2f} ({st.session_state.profit_target_pct}% above)
+                - Stop: ${stop_auto:.2f} ({st.session_state.stop_loss_pct}% below)
                 """)
             
-            # Hidden auto-calculations
+            # Calculate cutoff date
             cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
             cutoff_date = datetime.now().date() + timedelta(days=max(cutoff_days, 1))
             
-            # Estimate IV and Delta (will be updated when position is saved)
+            # Estimate IV and Delta
             try:
                 stock_temp = yf.Ticker(ticker_pos)
                 current_price_temp = stock_temp.history(period="1d")['Close'].iloc[-1]
@@ -781,16 +838,17 @@ if st.session_state.price and st.session_state.expiries:
                     else:
                         st.error("❌ Failed to save. Check Google Sheets connection.")
     
+    # --- STRATEGY GUIDE TAB ---
     with t_edu:
         st.header("📖 Strategy Guide")
         st.markdown("""
         **Quick Reference:**
         - 🟢 ADD MORE - Position profitable, add contracts
         - 🔵 HOLD - Position intact, monitor
-        - 🟡 PARTIAL PROFIT - Take some off the table
+        - 🟡 PARTIAL PROFIT - Take some off
         - 🟢 TAKE PROFIT - Target reached, exit
         - 🔴 SELL IMMEDIATELY - Stop loss hit
-        - 🟠 EXIT - Edge deteriorated or time running out
+        - 🟠 EXIT - Edge deteriorated
         """)
 
 else:
