@@ -51,33 +51,80 @@ def get_technicals(df):
     
     return df.iloc[-1], df.iloc[-2]
 
-# --- AI RESEARCH ENGINE (Google Search AI Grounding) ---
+# --- NEW: Fetch news from Yahoo Finance (no API limits!) ---
+def fetch_news_for_ticker(ticker):
+    """Fetch latest news for a ticker using yfinance - completely free, no rate limits."""
+    try:
+        stock = yf.Ticker(ticker)
+        news_list = stock.news
+        
+        if not news_list:
+            return None
+        
+        # Get up to 8 most recent news articles
+        formatted_news = []
+        for item in news_list[:8]:
+            formatted_news.append({
+                'title': item.get('title', 'No title'),
+                'link': item.get('link', '#'),
+                'publisher': item.get('publisher', 'Unknown'),
+                'providerPublishTime': item.get('providerPublishTime', '')
+            })
+        return formatted_news
+    except Exception as e:
+        st.warning(f"Could not fetch news: {str(e)[:100]}")
+        return None
+
+# --- AI RESEARCH ENGINE (Now using Yahoo Finance news + Gemini summarization) ---
 def get_ai_research(ticker):
     api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key: return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
-    client = genai.Client(api_key=api_key)
-    model_id = "gemini-2.0-flash" 
+    if not api_key:
+        return "⚠️ Please add GEMINI_API_KEY to Streamlit Secrets."
+    
+    # Fetch news using yfinance (free, no rate limits)
+    news_articles = fetch_news_for_ticker(ticker)
+    
+    if not news_articles:
+        return f"ℹ️ No recent news found for {ticker}. The stock may have low coverage or the ticker is invalid."
+    
+    # Format news for Gemini prompt
+    news_text = "\n\n".join([
+        f"**News {i+1}** (Source: {item['publisher']})\nTitle: {item['title']}\nLink: {item['link']}"
+        for i, item in enumerate(news_articles)
+    ])
     
     prompt = f"""
-    Perform a live web search for the stock ticker {ticker}. 
-    Provide a factual bulleted cheat sheet:
-    1. Analyst Consensus: Current median price target and rating.
-    2. Catalyst Calendar: Next earnings date and any upcoming investor days.
-    3. Sentiment: Top 3 news drivers from the last 7 days.
-    4. View: Factual 'Buy' or 'Wait' summary based on the latest analyst updates.
-    MANDATORY: Use the Google Search tool for all data. Cite specific dates.
+    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker}.
+    
+    NEWS ARTICLES:
+    {news_text}
+    
+    Based ONLY on these news articles, provide a concise analysis:
+    
+    1. **Analyst Consensus**: What are analysts saying? (price targets, upgrades/downgrades if mentioned)
+    2. **Key Catalysts**: Upcoming events, earnings dates, product launches mentioned
+    3. **Sentiment Drivers**: Top 3 themes from the last 7 days
+    4. **Actionable View**: Based strictly on this news flow, give a "Bullish", "Neutral", or "Cautious" rating with 1-sentence reasoning
+    
+    Keep it factual and concise. Do not invent information not in the articles.
     """
+    
     try:
+        client = genai.Client(api_key=api_key)
+        model_id = "gemini-2.0-flash"
+        
         response = client.models.generate_content(
             model=model_id,
-            contents=prompt,
-            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
+            contents=prompt
         )
-        return response.text
+        
+        # Add source attribution
+        return f"### 📰 News Summary for {ticker}\n\n{response.text}\n\n---\n*📌 Sources: {len(news_articles)} recent news articles from Yahoo Finance*"
+        
     except Exception as e:
         if "429" in str(e):
-            return "❌ **Quota Exhausted.** Google Search AI is rate-limited. Please wait 60s."
-        return f"❌ **Search AI Unavailable.** (Detail: {str(e)[:60]}...)"
+            return "❌ **Gemini API rate limited.** Please wait 60 seconds and try again."
+        return f"❌ **AI Summary Failed.** Error: {str(e)[:100]}"
 
 # --- PAGE CONFIG & SESSION STATE ---
 st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
@@ -192,7 +239,7 @@ if st.session_state.price and st.session_state.expiries:
     # Tabs Container
     t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
         "📋 Global Recommendations", "🛡️ Conservative Buy", "⚡ Aggressive Buy", 
-        "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Grounding", "📖 Strategy Guide"
+        "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Research", "📖 Strategy Guide"
     ])
 
     # Permanent Summary Tab Rendering Engine
@@ -435,16 +482,21 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
+    # --- MODIFIED AI RESEARCH TAB (Now uses Yahoo Finance news, not Google Search) ---
     with t_ai:
         c1, c2 = st.columns([4, 1])
-        with c1: st.subheader(f"🌐 Search AI Grounding Vector: {st.session_state.current_ticker}")
+        with c1: 
+            st.subheader(f"📰 News & AI Analysis: {st.session_state.current_ticker}")
+            st.caption("Powered by Yahoo Finance news + Gemini AI summarization (no rate limits)")
         with c2:
-            if st.button("🔄 Refresh Data Vector", use_container_width=True):
+            if st.button("🔄 Refresh News", use_container_width=True):
                 st.session_state.ai_brief = ""
                 st.rerun()
+        
         if not st.session_state.ai_brief:
-            with st.spinner("Executing real-time web scan query..."):
+            with st.spinner("Fetching latest news and generating AI summary..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+        
         st.markdown(st.session_state.ai_brief)
 
     # Built out Strategy Guide Master Encyclopedia
