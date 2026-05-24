@@ -128,13 +128,16 @@ if fetch_btn:
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
             st.session_state.pct_change = ((st.session_state.price / hist['Close'].iloc[-20]) - 1) * 100
             
-            # Pre-calculate base tech metrics for scoring indicators
+            # FIXED: Calculate technicals first before using 'curr' and 'prev' variables
+            df_tech_init = hist.copy()
+            curr_init, prev_init = get_technicals(df_tech_init)
+            
             tech_score = 0
-            if curr['ema8'] > curr['ema20']: tech_score += 1
-            if curr['hist'] > prev['hist']: tech_score += 1
+            if curr_init['ema8'] > curr_init['ema20']: tech_score += 1
+            if curr_init['hist'] > prev_init['hist']: tech_score += 1
             if st.session_state.price > sma20_val: tech_score += 1
 
-            # NEW LOGIC: Multi-expiration background scanner for the Summary Tab
+            # Multi-expiration background scanner for the Summary Tab
             today = datetime.now().date()
             valid_global_expiries = [exp for exp in stock_obj.options if (pd.to_datetime(exp).date() - today).days >= 60]
             
@@ -142,7 +145,6 @@ if fetch_btn:
             aggr_candidates = []
             spec_candidates = []
             
-            # Scans up to the first 6 valid future dates to avoid API timeouts
             with st.spinner("Processing mathematical matrix across options chain..."):
                 for exp_date in valid_global_expiries[:6]:
                     try:
@@ -184,17 +186,17 @@ if st.session_state.price and st.session_state.expiries:
     
     col_p, col_t = st.columns(2)
     col_p.metric("Current Underlying Price", f"${S:.2f}")
-    col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_state.pct_change:.1f}%")
+    col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_change:.1f}%" if 'session_change' in locals() else f"{st.session_state.pct_change:.1f}%")
 
     st.divider()
     
-    # Restructured View Tabs Container
+    # Tabs Container
     t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
         "📋 Global Recommendations", "🛡️ Conservative Buy", "⚡ Aggressive Buy", 
         "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Grounding", "📖 Strategy Guide"
     ])
 
-    # NEW ACTION 1: Permanent Summary Tab Rendering Engine
+    # Permanent Summary Tab Rendering Engine
     with t_summary:
         st.subheader("🏁 Automated Quantitative Trading Dashboard")
         st.markdown("This panel displays the mathematically optimal contract selection across the *entire chain life* matching our risk filters ($\ge$ 60 Days Expiry).")
@@ -244,7 +246,7 @@ if st.session_state.price and st.session_state.expiries:
     # Fetch Call Chain Options table for specific selections
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     
-    # Standard tech metric arrays for the workspace calculations
+    # Recalculate full tech variables for individual interactive views
     tech_score = 0
     verdict_reasons = []
     if not st.session_state.hist_data.empty:
@@ -289,7 +291,6 @@ if st.session_state.price and st.session_state.expiries:
                 g_hold = min(int(g_prof['days'] * 0.4), 45)
                 g_date = (datetime.now() + timedelta(days=g_hold)).strftime('%B %d, %Y')
                 
-                # Fixed Action 4: Changed unsafe_allowed_html to unsafe_allow_html
                 box_html = f"""
                 <div style="border: 2px solid #4CAF50; padding: 15px; border-radius: 8px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
                     <h4 style="margin-top:0; color:#4CAF50;">System Absolute Recommendation: {g_prof['expiry']} Expiry | ${g_prof['strike']:.2f} Call</h4>
