@@ -6,3 +6,5 @@ scipy
 requests
 google-genai>=1.55.0
 groq
+gspread
+google-auth
