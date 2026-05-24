@@ -424,8 +424,9 @@ if st.session_state.price and st.session_state.expiries:
 
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
-            tier_contracts = []
+            # First, collect all contracts for this expiry
             all_available_contracts = []
+            tier_contracts = []
             
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
@@ -451,105 +452,137 @@ if st.session_state.price and st.session_state.expiries:
                 st.error("No valid options contracts returned from data stream for this expiry.")
                 return
 
+            # Calculate the BEST contract for this tier (highest EV)
             if tier_contracts:
-                df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
-                default_strike = df_tier.iloc[0]['strike']
+                best_contract = max(tier_contracts, key=lambda x: x['ev'])
             else:
-                df_all_fallback = pd.DataFrame(all_available_contracts).sort_values(by='strike')
-                default_strike = df_all_fallback.iloc[(df_all_fallback['strike'] - S).abs().argsort()[:1]].iloc[0]['strike']
-
-            df_all = pd.DataFrame(all_available_contracts)
-            strike_list = sorted(df_all['strike'].tolist())
-
-            # Interactive Dropdown showing all strikes
-            selected_k = st.selectbox(f"Select Alternative Strike to Inspect ({tier_label} Sandbox):", strike_list, index=strike_list.index(default_strike), key=f"sel_{tier_label}_{expiry}")
+                # If no contracts in delta range, use the closest to target delta
+                target_delta = (delta_min + delta_max) / 2
+                best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
             
-            chosen = df_all[df_all['strike'] == selected_k].iloc[0]
-            chosen_exit = chosen['mid'] * (1 + profit_target_pct / 100)
-            chosen_stop = chosen['mid'] * (1 - stop_loss_pct / 100)
-            chosen_hold = min(int(days_to_expiry * 0.4), 45)
-            chosen_date = (datetime.now() + timedelta(days=chosen_hold)).strftime('%B %d, %Y')
+            # LOCKED RECOMMENDATION SECTION (Never changes)
+            st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
+            st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
             
-            st.markdown(f"### 🎯 Active Selection Recommendation Metrics (${selected_k:.2f} Call)")
-            box_html = f"""
-            <div style="border: 2px solid #2196F3; padding: 15px; border-radius: 8px; background-color: rgba(33, 150, 243, 0.1); margin-bottom: 25px;">
-                <h4 style="margin-top:0; color:#2196F3;">Calculated Directives for the ${chosen['strike']:.2f} Strike Structure:</h4>
+            # Calculate exit/stop for recommended contract
+            reco_exit = best_contract['mid'] * (1 + profit_target_pct / 100)
+            reco_stop = best_contract['mid'] * (1 - stop_loss_pct / 100)
+            reco_hold = min(int(days_to_expiry * 0.4), 45)
+            reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
+            
+            # Display the locked recommendation
+            reco_html = f"""
+            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
+                <h4 style="margin-top:0; color:#4CAF50;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
                 <table style="width:100%; border:none; color:inherit; margin-top:10px;">
                     <tr>
-                        <td><b>Composite Score:</b> {chosen['cts']}/100</td>
-                        <td><b>Entry Mid Price:</b> ${chosen['mid']:.2f}</td>
-                        <td><b>Take Profit Target:</b> ${chosen_exit:.2f}</td>
+                        <td><b>Composite Score:</b></td>
+                        <td>{best_contract['cts']}/100</td>
+                        <td><b>Entry Mid Price:</b></td>
+                        <td>${best_contract['mid']:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Stop Loss Point:</b> ${chosen_stop:.2f}</td>
-                        <td><b>Max Hold Limit:</b> {chosen_hold} Days</td>
-                        <td><b>Calendar Cutoff Date:</b> {chosen_date}</td>
+                        <td><b>Take Profit Target:</b></td>
+                        <td>${reco_exit:.2f}</td>
+                        <td><b>Stop Loss Point:</b></td>
+                        <td>${reco_stop:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Max Hold Limit:</b></td>
+                        <td>{reco_hold} Days</td>
+                        <td><b>Calendar Cutoff Date:</b></td>
+                        <td>{reco_date}</td>
                     </tr>
                 </table>
             </div>
             """
-            st.markdown(box_html, unsafe_allow_html=True)
-
+            st.markdown(reco_html, unsafe_allow_html=True)
+            
+            # DIVIDER
             st.divider()
             
-            st.markdown("### 🔍 Mathematical Output Summary")
-            c1, c2, c3 = st.columns([1.5, 1.5, 2])
-            with c1:
-                # Conviction Status Indicators with Embedded Definitions
-                if chosen['cts'] >= 55 and chosen['ev'] > 0:
-                    st.success("✅ STRUCTURAL BUY INSTANCE")
+            # COMPARISON SECTION (Dropdown only affects this part)
+            st.markdown("### 🔍 Compare Other Strikes")
+            st.markdown("*Select any strike below to see how its mathematical metrics compare to the recommendation above*")
+            
+            # Create dropdown with all strikes, default to best contract
+            strike_list = sorted([item['strike'] for item in all_available_contracts])
+            default_index = strike_list.index(best_contract['strike']) if best_contract['strike'] in strike_list else 0
+            
+            selected_k = st.selectbox(
+                f"Select Strike to Analyze ({tier_label} Comparison):", 
+                strike_list, 
+                index=default_index, 
+                key=f"compare_{tier_label}_{expiry}"
+            )
+            
+            # Find the selected contract data
+            selected_contract = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            
+            if selected_contract:
+                selected_exit = selected_contract['mid'] * (1 + profit_target_pct / 100)
+                selected_stop = selected_contract['mid'] * (1 - stop_loss_pct / 100)
+                selected_hold = min(int(days_to_expiry * 0.4), 45)
+                selected_date = (datetime.now() + timedelta(days=selected_hold)).strftime('%B %d, %Y')
+                
+                st.markdown("### 📊 Mathematical Output Summary")
+                c1, c2, c3 = st.columns([1.5, 1.5, 2])
+                with c1:
+                    # Conviction Status Indicators
+                    if selected_contract['cts'] >= 55 and selected_contract['ev'] > 0:
+                        st.success("✅ STRUCTURAL BUY INSTANCE")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> The odds are highly in your favor. The combination of healthy upward stock momentum, 
+                        a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    elif selected_contract['cts'] >= 40 and selected_contract['ev'] > 0:
+                        st.warning("⚠️ WEAK EDGE PATTERN")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> This option has a mathematical edge, but it is thin. Some charts are flashing mixed signals, 
+                        meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
+                        Statistically, playing these setups results in an outright loss over time.
+                        </p>
+                        """, unsafe_allow_html=True)
+                        
+                    st.metric("Composite Score", f"{selected_contract['cts']}/100")
+                    st.metric("Entry Target", f"${selected_contract['mid']:.2f}")
+                    
+                with c2:
+                    st.metric("Take Profit Target", f"${selected_exit:.2f}")
+                    st.metric("Stop Loss Point", f"${selected_stop:.2f}")
+                    st.write(f"⏱️ **Hold Cutoff:** `{selected_hold} days` ({selected_date})")
+
+                with c3:
+                    st.write("**Stochastic Engine Outputs**")
+                    st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{selected_contract['delta'] * 100:.1f}%`")
+                    st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{selected_contract['p_touch'] * 100:.1f}%`")
+                    st.write(f"- Expected Valuation ($E[X]$): `{selected_contract['ev']:.3f}`")
+                    st.write(f"- Volatility Index (IV): `{selected_contract['iv']*100:.1f}%` | Daily Theta: `-{abs(selected_contract['theta']):.3f}`")
+                    
                     st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
-                    <b>What this means in plain English:</b> The odds are highly in your favor. 
-                    The combination of healthy upward stock momentum, a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
-                    </p>
-                    """, unsafe_allow_html=True)
-                elif chosen['cts'] >= 40 and chosen['ev'] > 0:
-                    st.warning("⚠️ WEAK EDGE PATTERN")
-                    st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
-                    <b>What this means in plain English:</b> This option has a mathematical edge, but it is thin. 
-                    Some charts are flashing mixed signals, meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
-                    </p>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.error("❌ NEGATIVE EXPECTANCY AVOID")
-                    st.markdown("""
-                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
-                    <b>What this means in plain English:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
-                    Statistically, playing these setups results in an outright loss over time.
-                    </p>
+                    <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
+                    <b>📈 What these numbers mean:</b><br>
+                    • <b>Delta Proxy:</b> Estimated chance this contract finishes in the money at expiration.<br>
+                    • <b>Touch Probability:</b> Likelihood the stock price touches this strike before expiry.<br>
+                    • <b>Expected Value ($E[X]$):</b> Net profit expectancy. Positive = favorable risk-reward.<br>
+                    • <b>Daily Theta:</b> Premium value lost each day from time decay.
+                    </div>
                     """, unsafe_allow_html=True)
                     
-                st.metric("Inspected Score Metric", f"{chosen['cts']}/100")
-                st.metric("Inspected Entry Target", f"${chosen['mid']:.2f}")
-                
-            with c2:
-                st.metric("Inspected Take Profit", f"${chosen_exit:.2f}")
-                st.metric("Inspected Stop Loss", f"${chosen_stop:.2f}")
-                st.write(f"⏱️ **Hold Cutoff:** `{chosen_hold} days` ({chosen_date})")
-
-            with c3:
-                st.write("**Stochastic Engine Outputs**")
-                st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`")
-                st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{chosen['p_touch'] * 100:.1f}%`")
-                st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
-                st.write(f"- Volatility Index (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
-                
-                st.markdown("""
-                <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
-                <b>📈 What these numbers mean in plain English:</b><br>
-                • <b>Delta Proxy:</b> The estimated mathematical chance this contract finishes completely inside the money at expiration.<br>
-                • <b>Path Touch Probability:</b> The likelihood that the stock price flashes or touches this strike at least <i>once</i> before expiry (giving you a chance to exit early). This is usually double the Delta value.<br>
-                • <b>Expected Valuation ($E[X]$):</b> The net profit expectancy. A positive value means the risk-to-reward math favors long setups over time.<br>
-                • <b>Daily Theta:</b> The amount of premium value this option drops every single day just from time moving forward. Higher IV speeds up this decay.
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.write("")
-                h_chart = yf.Ticker(chosen['symbol']).history(period="1mo")
-                if not h_chart.empty: 
-                    st.line_chart(h_chart['Close'])
+                    st.write("")
+                    h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
+                    if not h_chart.empty: 
+                        st.line_chart(h_chart['Close'])
 
     # Map strategies into isolated tiers 
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
