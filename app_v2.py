@@ -60,7 +60,6 @@ def get_ai_research(ticker):
     
     prompt = f"""
     Perform a live web search for the stock ticker {ticker}. 
-    Today is {datetime.now().strftime('%B %d, %Y')}.
     Provide a factual bulleted cheat sheet:
     1. Analyst Consensus: Current median price target and rating.
     2. Catalyst Calendar: Next earnings date and any upcoming investor days.
@@ -264,53 +263,69 @@ if st.session_state.price and st.session_state.expiries:
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
             tier_contracts = []
+            all_available_contracts = []
             
+            # Change 1: Track filtered candidates AND capture all chain listings for the selector dropdown
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
                 
                 d, g, t, v = calculate_greeks(S, row['strike'], T_years, 0.05, row['impliedVolatility'])
+                p_touch = calculate_p_touch(S, row['strike'], T_years, row['impliedVolatility'])
+                pot_profit = mid * (1 + profit_target_pct / 100)
+                pot_loss = mid * (stop_loss_pct / 100)
+                ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
+                cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
                 
+                item = {
+                    'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
+                    'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 'symbol': row['contractSymbol']
+                }
+                
+                all_available_contracts.append(item)
                 if delta_min <= d <= delta_max:
-                    p_touch = calculate_p_touch(S, row['strike'], T_years, row['impliedVolatility'])
-                    pot_profit = mid * (1 + profit_target_pct / 100)
-                    pot_loss = mid * (stop_loss_pct / 100)
-                    ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
-                    cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
-                    
-                    tier_contracts.append({
-                        'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
-                        'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 'symbol': row['contractSymbol']
-                    })
+                    tier_contracts.append(item)
             
-            if not tier_contracts:
-                st.error(f"No contracts available on this specific selected expiry date ({expiry}) matching the Delta bounds.")
+            if not all_available_contracts:
+                st.error("No valid options contracts returned from data stream for this expiry.")
                 return
 
-            df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
+            # Determine baseline default drop-down item from tier filtered criteria
+            if tier_contracts:
+                df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
+                default_strike = df_tier.iloc[0]['strike']
+            else:
+                df_all_fallback = pd.DataFrame(all_available_contracts).sort_values(by='strike')
+                # Fallback directly to closest ATM if tier parameters return empty 
+                default_strike = df_all_fallback.iloc[(df_all_fallback['strike'] - S).abs().argsort()[:1]].iloc[0]['strike']
+
+            df_all = pd.DataFrame(all_available_contracts)
+            strike_list = sorted(df_all['strike'].tolist())
+
+            # Interactive Dropdown showing all strikes
+            selected_k = st.selectbox(f"Select Alternative Strike to Inspect ({tier_label} Sandbox):", strike_list, index=strike_list.index(default_strike), key=f"sel_{tier_label}_{expiry}")
             
-            # Change 2: Recommendation changes dynamically based on the sidebar's expiration date choice
-            optimal_contract = df_tier.iloc[0]
-            opt_exit = optimal_contract['mid'] * (1 + profit_target_pct / 100)
-            opt_stop = optimal_contract['mid'] * (1 - stop_loss_pct / 100)
-            opt_hold = min(int(days_to_expiry * 0.4), 45)
-            opt_date = (datetime.now() + timedelta(days=opt_hold)).strftime('%B %d, %Y')
+            # Change 2: Re-bind active recommendations to match whichever custom strike choice is active
+            chosen = df_all[df_all['strike'] == selected_k].iloc[0]
+            chosen_exit = chosen['mid'] * (1 + profit_target_pct / 100)
+            chosen_stop = chosen['mid'] * (1 - stop_loss_pct / 100)
+            chosen_hold = min(int(days_to_expiry * 0.4), 45)
+            chosen_date = (datetime.now() + timedelta(days=chosen_hold)).strftime('%B %d, %Y')
             
-            st.markdown(f"### 🎯 Optimal Selection for {expiry} Expiry ({tier_label})")
+            st.markdown(f"### 🎯 Active Selection Recommendation Metrics (${selected_k:.2f} Call)")
             box_html = f"""
             <div style="border: 2px solid #2196F3; padding: 15px; border-radius: 8px; background-color: rgba(33, 150, 243, 0.1); margin-bottom: 25px;">
-                <h4 style="margin-top:0; color:#2196F3;">Best Choice for Selected Expiry: ${optimal_contract['strike']:.2f} Call</h4>
-                <p style="margin:4px 0;">Calculated optimal target parameters for this expiration tier:</p>
+                <h4 style="margin-top:0; color:#2196F3;">Calculated Directives for the ${chosen['strike']:.2f} Strike Structure:</h4>
                 <table style="width:100%; border:none; color:inherit; margin-top:10px;">
                     <tr>
-                        <td><b>Composite Score:</b> {optimal_contract['cts']}/100</td>
-                        <td><b>Entry Mid Price:</b> ${optimal_contract['mid']:.2f}</td>
-                        <td><b>Take Profit Target:</b> ${opt_exit:.2f}</td>
+                        <td><b>Composite Score:</b> {chosen['cts']}/100</td>
+                        <td><b>Entry Mid Price:</b> ${chosen['mid']:.2f}</td>
+                        <td><b>Take Profit Target:</b> ${chosen_exit:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Stop Loss Point:</b> ${opt_stop:.2f}</td>
-                        <td><b>Max Hold Limit:</b> {opt_hold} Days</td>
-                        <td><b>Calendar Cutoff Date:</b> {opt_date}</td>
+                        <td><b>Stop Loss Point:</b> ${chosen_stop:.2f}</td>
+                        <td><b>Max Hold Limit:</b> {chosen_hold} Days</td>
+                        <td><b>Calendar Cutoff Date:</b> {chosen_date}</td>
                     </tr>
                 </table>
             </div>
@@ -319,28 +334,42 @@ if st.session_state.price and st.session_state.expiries:
 
             st.divider()
             
-            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
-            strike_list = sorted(df_tier['strike'].tolist())
-            selected_k = st.selectbox(f"Select Alternative {tier_label} Strike to Investigate:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
-            
-            chosen = df_tier[df_tier['strike'] == selected_k].iloc[0]
-            chosen_cts = int(((chosen['delta'] * 0.4) + (chosen['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
-            
+            st.markdown("### 🔍 Mathematical Output Summary")
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
-                if chosen_cts >= 55 and chosen['ev'] > 0: st.success("✅ STRUCTURAL BUY INSTANCE")
-                elif chosen_cts >= 40 and chosen['ev'] > 0: st.warning("⚠️ WEAK EDGE PATTERN")
-                else: st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                # Change 4: Map clean English definitions explaining what each status means
+                if chosen['cts'] >= 55 and chosen['ev'] > 0:
+                    st.success("✅ STRUCTURAL BUY INSTANCE")
+                    st.markdown("""
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
+                    <b>What this means:</b> The system sees a highly favorable trade setup. The chart trend, 
+                    probability of winning, and price entry are all aligned in your favor.
+                    </p>
+                    """, unsafe_allow_html=True)
+                elif chosen['cts'] >= 40 and chosen['ev'] > 0:
+                    st.warning("⚠️ WEAK EDGE PATTERN")
+                    st.markdown("""
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
+                    <b>What this means:</b> The setup has mathematical potential, but lacks full confirmation. 
+                    Some indicators or momentum conditions are conflicting. Proceed with cautious positioning.
+                    </p>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                    st.markdown("""
+                    <p style='font-size:0.85rem; color:rgba(255,255,255,0.7);'>
+                    <b>What this means:</b> The mathematical odds are stacked against this position. 
+                    The combination of steep premium pricing, weak momentum, or long distances to the strike price suggests an unfavorable risk-reward ratio.
+                    </p>
+                    """, unsafe_allow_html=True)
                     
-                st.metric("Inspected Score Metric", f"{chosen_cts}/100")
+                st.metric("Inspected Score Metric", f"{chosen['cts']}/100")
                 st.metric("Inspected Entry Target", f"${chosen['mid']:.2f}")
                 
             with c2:
-                st.metric("Inspected Take Profit", f"${chosen['mid'] * (1 + profit_target_pct / 100):.2f}")
-                st.metric("Inspected Stop Loss", f"${chosen['mid'] * (1 - stop_loss_pct / 100):.2f}")
-                h_days_lim = min(int(days_to_expiry * 0.4), 45)
-                h_date_lim = (datetime.now() + timedelta(days=h_days_lim)).strftime('%B %d, %Y')
-                st.write(f"⏱️ **Hold Cutoff:** `{h_days_lim} days` ({h_date_lim})")
+                st.metric("Inspected Take Profit", f"${chosen_exit:.2f}")
+                st.metric("Inspected Stop Loss", f"${chosen_stop:.2f}")
+                st.write(f"⏱️ **Hold Cutoff:** `{chosen_hold} days` ({chosen_date})")
 
             with c3:
                 st.write("**Stochastic Engine Outputs**")
@@ -349,7 +378,6 @@ if st.session_state.price and st.session_state.expiries:
                 st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
                 st.write(f"- Volatility Index (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
                 
-                # Change 3: Short, simple English definitions container
                 st.markdown("""
                 <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
                 <b>📈 What these numbers mean in plain English:</b><br>
