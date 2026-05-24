@@ -798,7 +798,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
         # ========================
-    # PORTFOLIO TAB (UPDATED with Strike/Expiry Dropdowns)
+    # PORTFOLIO TAB (CORRECTED - Uses Option Price, Not Stock Price)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -861,9 +861,20 @@ if st.session_state.price and st.session_state.expiries:
                     return best['strike'], best['mid']
                 else:
                     # Fallback: closest to 0.55 delta
-                    closest = min(calls.iterrows(), key=lambda x: abs(((x[1]['bid'] + x[1]['ask']) / 2 if x[1]['bid'] > 0 else x[1]['lastPrice']) / 100 - 0.55))
-                    mid_closest = (closest[1]['bid'] + closest[1]['ask']) / 2 if closest[1]['bid'] > 0 else closest[1]['lastPrice']
-                    return closest[1]['strike'], mid_closest
+                    closest = None
+                    closest_diff = float('inf')
+                    for _, row in calls.iterrows():
+                        mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        if mid_p <= 0:
+                            continue
+                        d, _, _, _ = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
+                        diff = abs(d - 0.55)
+                        if diff < closest_diff:
+                            closest_diff = diff
+                            closest = (row['strike'], mid_p)
+                    if closest:
+                        return closest[0], closest[1]
+                    return None, None
             except Exception as e:
                 return None, None
         
@@ -887,7 +898,24 @@ if st.session_state.price and st.session_state.expiries:
             except Exception as e:
                 return []
         
-        # Trader selection - dynamically gets list from Google Sheets
+        # Helper function to get current option price
+        def get_current_option_price(ticker, expiry, strike):
+            """Get current mid price for an option."""
+            try:
+                stock_obj = yf.Ticker(ticker)
+                opt_chain = stock_obj.option_chain(expiry)
+                calls = opt_chain.calls
+                option_row = calls[calls['strike'] == strike]
+                if not option_row.empty:
+                    row = option_row.iloc[0]
+                    mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                    iv = row['impliedVolatility']
+                    return mid, iv
+                return None, None
+            except Exception as e:
+                return None, None
+        
+        # Trader selection
         trader_options = get_trader_list()
         selected_trader = st.selectbox("Select Trader:", trader_options, key="trader_select")
         
@@ -923,7 +951,7 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # --- DISPLAY ACTIVE POSITIONS ---
+        # --- DISPLAY ACTIVE POSITIONS (CORRECTED) ---
         st.subheader("📊 Active Positions")
         positions = get_portfolio_positions(selected_trader)
         
@@ -938,65 +966,98 @@ if st.session_state.price and st.session_state.expiries:
                     st.markdown(f"---")
                     col1, col2, col3 = st.columns([2, 2, 1])
                     
+                    entry_price = float(pos['entry_price'])
+                    contracts = int(pos['contracts'])
+                    
                     with col1:
                         st.markdown(f"**{pos['ticker']} ${float(pos['strike']):.2f} Call**")
                         st.caption(f"Expiry: {pos['expiry']}")
-                        st.caption(f"Contracts: {pos['contracts']} @ ${float(pos['entry_price']):.2f}")
+                        st.caption(f"Contracts: {contracts} @ ${entry_price:.2f}")
                         st.caption(f"Target: ${float(pos['target_price']):.2f} | Stop: ${float(pos['stop_loss']):.2f}")
                         st.caption(f"Cutoff: {pos['cutoff_date']}")
                     
                     with col2:
                         try:
-                            stock = yf.Ticker(pos['ticker'])
-                            current_price = stock.history(period="1d")['Close'].iloc[-1]
-                            expiry_date = pd.to_datetime(pos['expiry']).date()
-                            days_left = max((expiry_date - datetime.now().date()).days, 0)
+                            # Get CURRENT OPTION PRICE (not stock price!)
+                            option_price, current_iv = get_current_option_price(
+                                pos['ticker'], 
+                                pos['expiry'], 
+                                float(pos['strike'])
+                            )
                             
-                            # Get current Greeks
-                            try:
-                                option_chain = stock.option_chain(pos['expiry'])
-                                option_row = option_chain.calls[option_chain.calls['strike'] == float(pos['strike'])]
-                                if not option_row.empty:
-                                    current_iv = option_row['impliedVolatility'].iloc[0]
+                            if option_price and option_price > 0:
+                                # Calculate P&L based on option price
+                                days_left = max((pd.to_datetime(pos['expiry']).date() - datetime.now().date()).days, 0)
+                                
+                                # Get current delta for recommendation
+                                stock = yf.Ticker(pos['ticker'])
+                                current_stock_price = stock.history(period="1d")['Close'].iloc[-1]
+                                
+                                if current_iv:
                                     d, _, _, _ = calculate_greeks(
-                                        current_price, float(pos['strike']), max(days_left, 1)/365, 0.05, current_iv
+                                        current_stock_price, 
+                                        float(pos['strike']), 
+                                        max(days_left, 1) / 365, 
+                                        0.05, 
+                                        current_iv
                                     )
                                     current_delta = d
                                 else:
-                                    current_iv = 0.35
                                     current_delta = 0.5
-                            except:
-                                current_iv = 0.35
-                                current_delta = 0.5
-                            
-                            pnl = (current_price - float(pos['entry_price'])) * int(pos['contracts']) * 100
-                            pnl_pct = ((current_price - float(pos['entry_price'])) / float(pos['entry_price'])) * 100
-                            
-                            st.metric("Current Price", f"${current_price:.2f}", 
-                                     delta=f"{pnl_pct:+.1f}%", 
-                                     delta_color="normal")
-                            
-                            if pnl >= 0:
-                                st.caption(f"💰 P&L: +${pnl:.0f}")
+                                
+                                # Calculate P&L
+                                pnl = (option_price - entry_price) * contracts * 100
+                                pnl_pct = ((option_price - entry_price) / entry_price) * 100
+                                
+                                st.metric("Current Option Price", f"${option_price:.2f}", 
+                                         delta=f"{pnl_pct:+.1f}%", 
+                                         delta_color="normal")
+                                
+                                if pnl >= 0:
+                                    st.caption(f"💰 P&L: +${pnl:.0f}")
+                                else:
+                                    st.caption(f"💰 P&L: -${abs(pnl):.0f}")
+                                
+                                # Get recommendation based on option price
+                                target = float(pos['target_price'])
+                                stop = float(pos['stop_loss'])
+                                
+                                if option_price <= stop:
+                                    recommendation = "🔴 SELL IMMEDIATELY"
+                                    reason = f"Stop loss hit at ${stop:.2f} (Current: ${option_price:.2f})"
+                                elif option_price >= target:
+                                    recommendation = "🟢 TAKE PROFIT"
+                                    reason = f"Target reached at ${target:.2f} (Current: ${option_price:.2f})"
+                                elif option_price >= target * 0.8:
+                                    recommendation = "🟡 PARTIAL PROFIT"
+                                    reason = f"80% of target reached. Consider taking partial profits."
+                                elif days_left < 7:
+                                    recommendation = "🟠 EXIT SOON"
+                                    reason = f"Only {days_left} days left. Time decay accelerating."
+                                elif current_delta < 0.25:
+                                    recommendation = "🟠 EXIT"
+                                    reason = f"Delta dropped to {current_delta:.2f}. Probability decreased."
+                                elif pnl_pct > 0 and pnl_pct < 20 and current_delta > 0.45:
+                                    recommendation = "🟢 ADD MORE"
+                                    reason = f"Position is working. Consider adding at ${option_price:.2f}"
+                                else:
+                                    recommendation = "🔵 HOLD"
+                                    reason = f"Target: ${target:.2f}, Stop: ${stop:.2f}, Current: ${option_price:.2f}"
+                                
+                                if "SELL" in recommendation or "EXIT" in recommendation:
+                                    st.error(f"**{recommendation}**")
+                                elif "PROFIT" in recommendation:
+                                    st.success(f"**{recommendation}**")
+                                elif "ADD" in recommendation:
+                                    st.info(f"**{recommendation}**")
+                                else:
+                                    st.info(f"**{recommendation}**")
+                                st.caption(reason)
+                                st.caption(f"Days left: {days_left} | Delta: {current_delta:.2f}")
                             else:
-                                st.caption(f"💰 P&L: -${abs(pnl):.0f}")
-                            
-                            recommendation, reason = get_position_recommendation(
-                                pos, current_price, current_iv, current_delta, days_left
-                            )
-                            
-                            if "SELL" in recommendation or "EXIT" in recommendation:
-                                st.error(f"**{recommendation}**")
-                            elif "PROFIT" in recommendation:
-                                st.success(f"**{recommendation}**")
-                            elif "ADD" in recommendation:
-                                st.info(f"**{recommendation}**")
-                            else:
-                                st.info(f"**{recommendation}**")
-                            st.caption(reason)
-                            st.caption(f"Days left: {days_left} | Delta: {current_delta:.2f}")
+                                st.warning("Option price data unavailable")
                         except Exception as e:
-                            st.caption(f"⚠️ Data temporarily unavailable")
+                            st.caption(f"⚠️ Data error: {str(e)[:50]}")
                         
                     with col3:
                         if st.button("❌ Close", key=f"close_{idx}", use_container_width=True):
@@ -1007,7 +1068,7 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # --- ADD NEW POSITION FORM (UPDATED with Dropdowns) ---
+        # --- ADD NEW POSITION FORM ---
         st.subheader("➕ Add New Position")
         
         # Check if data is available
@@ -1017,9 +1078,8 @@ if st.session_state.price and st.session_state.expiries:
             # Get current ticker
             current_ticker = st.session_state.current_ticker if st.session_state.current_ticker else "SHOP"
             
-            # --- EXPIRY DROPDOWN (default = sidebar expiry) ---
+            # --- EXPIRY DROPDOWN ---
             expiry_options = st.session_state.expiries
-            # Find index of current sidebar expiry
             default_expiry_index = 0
             if 'expiry' in dir() and expiry in expiry_options:
                 default_expiry_index = expiry_options.index(expiry)
@@ -1034,11 +1094,9 @@ if st.session_state.price and st.session_state.expiries:
                 help="Select expiry date for the option"
             )
             
-            # Store in session state for persistence
             st.session_state.last_selected_expiry = selected_expiry_str
             
-            # --- STRIKE DROPDOWN (based on selected expiry) ---
-            # Get conservative recommended strike for this expiry
+            # --- STRIKE DROPDOWN ---
             cons_strike, cons_mid = get_conservative_strike_for_expiry(
                 current_ticker, 
                 selected_expiry_str,
@@ -1046,7 +1104,6 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.stop_loss_pct
             )
             
-            # Get all strikes for this expiry
             all_strikes = get_strikes_for_expiry(current_ticker, selected_expiry_str)
             
             if not all_strikes:
@@ -1054,7 +1111,6 @@ if st.session_state.price and st.session_state.expiries:
             else:
                 strike_options = [s['strike'] for s in all_strikes]
                 
-                # Find default strike index (conservative recommendation)
                 default_strike_index = 0
                 if cons_strike and cons_strike in strike_options:
                     default_strike_index = strike_options.index(cons_strike)
@@ -1067,14 +1123,12 @@ if st.session_state.price and st.session_state.expiries:
                     help=f"Conservative recommendation: ${cons_strike:.2f}" if cons_strike else "Select strike price"
                 )
                 
-                # Get mid price for selected strike
                 selected_mid = None
                 for s in all_strikes:
                     if s['strike'] == selected_strike:
                         selected_mid = s['mid']
                         break
                 
-                # Show conservative recommendation hint
                 if cons_strike and cons_strike == selected_strike:
                     st.caption(f"⭐ Recommended strike (Conservative strategy) - Mid price: ${selected_mid:.2f}" if selected_mid else "⭐ Recommended strike")
                 elif cons_strike:
@@ -1102,7 +1156,6 @@ if st.session_state.price and st.session_state.expiries:
                         )
                     
                     with col3:
-                        # Auto-filled entry price from selected strike's mid price
                         default_entry = selected_mid if selected_mid else 0.01
                         entry_price_pos = st.number_input(
                             "Entry Price (per contract):", 
@@ -1110,10 +1163,9 @@ if st.session_state.price and st.session_state.expiries:
                             step=0.05, 
                             format="%.2f",
                             value=default_entry,
-                            help=f"Auto-filled from mid price of ${selected_strike:.2f} strike. Change if needed."
+                            help=f"Auto-filled from mid price of ${selected_strike:.2f} strike"
                         )
                     
-                    # Auto-calculate targets based on current adjusters
                     target_auto = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
                     stop_auto = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
                     
@@ -1123,12 +1175,11 @@ if st.session_state.price and st.session_state.expiries:
                     - Stop: ${stop_auto:.2f} ({st.session_state.stop_loss_pct}% below entry)
                     """)
                     
-                    # Hidden auto-calculations
                     expiry_pos = pd.to_datetime(selected_expiry_str).date()
                     cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
                     cutoff_date = datetime.now().date() + timedelta(days=max(cutoff_days, 1))
                     
-                    # Estimate IV and Delta for the selected strike
+                    # Estimate IV and Delta
                     try:
                         stock_temp = yf.Ticker(ticker_pos)
                         current_price_temp = stock_temp.history(period="1d")['Close'].iloc[-1]
