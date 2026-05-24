@@ -7,7 +7,6 @@ import numpy as np
 from scipy.stats import norm
 from groq import Groq
 import time
-from datetime import datetime, timedelta
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
@@ -40,24 +39,22 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
                     {"role": "system", "content": "You are a financial analyst specializing in stock market news summarization."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.3-70b-versatile",  # 30 req/min, high quality
+                model="llama-3.3-70b-versatile",
                 max_tokens=600,
-                temperature=0.3,  # Lower temp for factual consistency
+                temperature=0.3,
             )
             return response.choices[0].message.content
         except Exception as e:
             error_str = str(e)
-            # Check if it's a rate limit error
             if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
                 if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt)  # 2, 4, 8 seconds
+                    wait_time = base_delay * (2 ** attempt)
                     st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    return None  # All retries exhausted
+                    return None
             else:
-                # Non-rate-limit error, don't retry
                 return None
     return None
 
@@ -113,7 +110,6 @@ def fetch_news_finnhub(ticker):
         return None
     
     try:
-        # Get news from last 7 days
         end_date = datetime.now()
         start_date = end_date - timedelta(days=7)
         
@@ -136,15 +132,14 @@ def fetch_news_finnhub(ticker):
         if not articles:
             return None
         
-        # Format articles with proper fields
         formatted_news = []
-        for item in articles[:8]:  # Get up to 8 most recent
+        for item in articles[:8]:
             formatted_news.append({
                 'title': item.get('headline', 'No title'),
                 'link': item.get('url', '#'),
                 'publisher': item.get('source', 'Unknown'),
                 'datetime': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d %H:%M'),
-                'summary': item.get('summary', '')[:200]  # Preview text
+                'summary': item.get('summary', '')[:200]
             })
         return formatted_news
     except Exception as e:
@@ -162,19 +157,16 @@ def get_ai_research(ticker):
     if not finnhub_api_key:
         return "⚠️ Please add FINNHUB_API_KEY to Streamlit Secrets."
     
-    # Check cache first
     cache_key = f"news_summary_{ticker}"
     cached_response = st.session_state.ai_cache.get(cache_key)
     if cached_response:
         return cached_response
     
-    # Fetch news using Finnhub
     news_articles = fetch_news_finnhub(ticker)
     
     if not news_articles:
         return f"ℹ️ No recent news found for {ticker} in the last 7 days."
     
-    # Format news for Groq prompt
     news_text = "\n\n".join([
         f"**News {i+1}** (Source: {item['publisher']}, Time: {item['datetime']})\n"
         f"Title: {item['title']}\n"
@@ -201,12 +193,9 @@ def get_ai_research(ticker):
     
     try:
         client = Groq(api_key=groq_api_key)
-        
-        # Use retry logic
         response_text = call_groq_with_retry(client, prompt)
         
         if response_text is None:
-            # Fallback: Show raw news without AI summary
             fallback = f"### 📰 Recent News for {ticker}\n\n"
             fallback += "*(AI summary temporarily unavailable due to rate limits. Here are the raw headlines:)*\n\n"
             for i, item in enumerate(news_articles[:5]):
@@ -214,19 +203,15 @@ def get_ai_research(ticker):
                 fallback += f"📌 Source: {item['publisher']} | 🕐 {item['datetime']}  \n"
                 fallback += f"🔗 [Read full article]({item['link']})  \n\n"
             fallback += "---\n*💡 Tip: Click 'Refresh News' in 30-60 seconds to try AI summary again.*"
-            
             result = fallback
         else:
-            # Add sources section
             sources_text = "\n".join([f"- [{item['title']}]({item['link']}) ({item['publisher']})" for item in news_articles[:5]])
             result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n### 🔗 Sources\n{sources_text}\n\n*📌 Data provided by Finnhub.io*"
         
-        # Cache the result
         st.session_state.ai_cache.set(cache_key, result)
         return result
         
     except Exception as e:
-        # Ultimate fallback: just show raw news
         fallback = f"### 📰 Recent News for {ticker}\n\n"
         fallback += "*(AI service unavailable. Here are the latest headlines:)*\n\n"
         for i, item in enumerate(news_articles[:5]):
@@ -243,13 +228,12 @@ state_keys = {
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
-    'ai_cache': None  # Will be initialized below
+    'ai_cache': None
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# Initialize AI cache
 if st.session_state.ai_cache is None:
     st.session_state.ai_cache = SimpleCache()
 
@@ -297,7 +281,6 @@ if fetch_btn:
             if curr_init['hist'] > prev_init['hist']: tech_score += 1
             if st.session_state.price > sma20_val: tech_score += 1
 
-            # Multi-expiration background scanner for the Summary Tab
             today = datetime.now().date()
             valid_global_expiries = [exp for exp in stock_obj.options if (pd.to_datetime(exp).date() - today).days >= 60]
             
@@ -350,13 +333,11 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Tabs Container
     t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
         "📋 Global Recommendations", "🛡️ Conservative Buy", "⚡ Aggressive Buy", 
         "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Research", "📖 Strategy Guide"
     ])
 
-    # Permanent Summary Tab Rendering Engine
     with t_summary:
         st.subheader("🏁 Automated Quantitative Trading Dashboard")
         st.markdown("This panel displays the mathematically optimal contract selection across the *entire chain life* matching our risk filters ($\ge$ 60 Days Expiry).")
@@ -393,7 +374,6 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("No contracts met the strict mathematical baseline definitions across the processed options chain.")
 
-    # Shared Dropdown Matrix for Individual Workspace Tabs
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 Workspace Adjuster")
     expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
@@ -403,10 +383,8 @@ if st.session_state.price and st.session_state.expiries:
     if days_to_expiry < 60:
         st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework recommendation rule.")
 
-    # Fetch Call Chain Options table for specific selections
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     
-    # Recalculate full tech variables for individual interactive views
     tech_score = 0
     verdict_reasons = []
     if not st.session_state.hist_data.empty:
@@ -424,13 +402,20 @@ if st.session_state.price and st.session_state.expiries:
 
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
-            # First, collect all contracts for this expiry
             all_available_contracts = []
             tier_contracts = []
             
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
+                
+                # Extract volume and liquidity data
+                volume = row.get('volume', 0)
+                open_interest = row.get('openInterest', 0)
+                bid = row.get('bid', 0)
+                ask = row.get('ask', 0)
+                spread = (ask - bid) if ask > 0 and bid > 0 else 0
+                spread_pct = (spread / mid) * 100 if mid > 0 else 100
                 
                 d, g, t, v = calculate_greeks(S, row['strike'], T_years, 0.05, row['impliedVolatility'])
                 p_touch = calculate_p_touch(S, row['strike'], T_years, row['impliedVolatility'])
@@ -439,9 +424,26 @@ if st.session_state.price and st.session_state.expiries:
                 ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
                 cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
                 
+                # Determine liquidity status
+                if volume < 10:
+                    liquidity_status = "🔴 EXTREMELY ILLIQUID"
+                    liquidity_warning = "Less than 10 contracts traded today. AVOID - you won't be able to exit."
+                elif volume < 50:
+                    liquidity_status = "🟠 LOW LIQUIDITY"
+                    liquidity_warning = "Low volume. Wide spreads likely. Exercise caution."
+                elif volume < 200:
+                    liquidity_status = "🟡 MODERATE LIQUIDITY"
+                    liquidity_warning = "Acceptable for smaller positions."
+                else:
+                    liquidity_status = "🟢 HIGHLY LIQUID"
+                    liquidity_warning = "Tight spreads, easy entry/exit."
+                
                 item = {
                     'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
-                    'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 'symbol': row['contractSymbol']
+                    'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 
+                    'symbol': row['contractSymbol'], 'volume': volume, 'open_interest': open_interest,
+                    'bid': bid, 'ask': ask, 'spread': spread, 'spread_pct': spread_pct,
+                    'liquidity_status': liquidity_status, 'liquidity_warning': liquidity_warning
                 }
                 
                 all_available_contracts.append(item)
@@ -452,25 +454,25 @@ if st.session_state.price and st.session_state.expiries:
                 st.error("No valid options contracts returned from data stream for this expiry.")
                 return
 
-            # Calculate the BEST contract for this tier (highest EV)
             if tier_contracts:
                 best_contract = max(tier_contracts, key=lambda x: x['ev'])
             else:
-                # If no contracts in delta range, use the closest to target delta
                 target_delta = (delta_min + delta_max) / 2
                 best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
             
-            # LOCKED RECOMMENDATION SECTION (Never changes)
+            # LOCKED RECOMMENDATION SECTION
             st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
             st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
             
-            # Calculate exit/stop for recommended contract
+            # Add liquidity warning prominently if contract is illiquid
+            if best_contract['volume'] < 50:
+                st.warning(f"{best_contract['liquidity_status']}: {best_contract['liquidity_warning']}")
+            
             reco_exit = best_contract['mid'] * (1 + profit_target_pct / 100)
             reco_stop = best_contract['mid'] * (1 - stop_loss_pct / 100)
             reco_hold = min(int(days_to_expiry * 0.4), 45)
             reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
             
-            # Display the locked recommendation
             reco_html = f"""
             <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
                 <h4 style="margin-top:0; color:#4CAF50;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
@@ -493,6 +495,18 @@ if st.session_state.price and st.session_state.expiries:
                         <td><b>Calendar Cutoff Date:</b></td>
                         <td>{reco_date}</td>
                     </tr>
+                    <tr>
+                        <td><b>Volume Today:</b></td>
+                        <td>{best_contract['volume']:,} contracts</td>
+                        <td><b>Open Interest:</b></td>
+                        <td>{best_contract['open_interest']:,}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Bid-Ask Spread:</b></td>
+                        <td>${best_contract['spread']:.2f} ({best_contract['spread_pct']:.1f}%)</td>
+                        <td><b>Liquidity:</b></td>
+                        <td>{best_contract['liquidity_status']}</td>
+                    </tr>
                 </table>
             </div>
             """
@@ -501,11 +515,10 @@ if st.session_state.price and st.session_state.expiries:
             # DIVIDER
             st.divider()
             
-            # COMPARISON SECTION (Dropdown only affects this part)
+            # COMPARISON SECTION
             st.markdown("### 🔍 Compare Other Strikes")
             st.markdown("*Select any strike below to see how its mathematical metrics compare to the recommendation above*")
             
-            # Create dropdown with all strikes, default to best contract
             strike_list = sorted([item['strike'] for item in all_available_contracts])
             default_index = strike_list.index(best_contract['strike']) if best_contract['strike'] in strike_list else 0
             
@@ -516,7 +529,6 @@ if st.session_state.price and st.session_state.expiries:
                 key=f"compare_{tier_label}_{expiry}"
             )
             
-            # Find the selected contract data
             selected_contract = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
             
             if selected_contract:
@@ -525,10 +537,13 @@ if st.session_state.price and st.session_state.expiries:
                 selected_hold = min(int(days_to_expiry * 0.4), 45)
                 selected_date = (datetime.now() + timedelta(days=selected_hold)).strftime('%B %d, %Y')
                 
+                # Show liquidity warning for selected contract if illiquid
+                if selected_contract['volume'] < 50 and selected_k != best_contract['strike']:
+                    st.warning(f"⚠️ {selected_contract['liquidity_status']}: {selected_contract['liquidity_warning']}")
+                
                 st.markdown("### 📊 Mathematical Output Summary")
                 c1, c2, c3 = st.columns([1.5, 1.5, 2])
                 with c1:
-                    # Conviction Status Indicators
                     if selected_contract['cts'] >= 55 and selected_contract['ev'] > 0:
                         st.success("✅ STRUCTURAL BUY INSTANCE")
                         st.markdown("""
@@ -561,6 +576,8 @@ if st.session_state.price and st.session_state.expiries:
                     st.metric("Take Profit Target", f"${selected_exit:.2f}")
                     st.metric("Stop Loss Point", f"${selected_stop:.2f}")
                     st.write(f"⏱️ **Hold Cutoff:** `{selected_hold} days` ({selected_date})")
+                    st.metric("Volume Today", f"{selected_contract['volume']:,}")
+                    st.metric("Open Interest", f"{selected_contract['open_interest']:,}")
 
                 with c3:
                     st.write("**Stochastic Engine Outputs**")
@@ -568,6 +585,7 @@ if st.session_state.price and st.session_state.expiries:
                     st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{selected_contract['p_touch'] * 100:.1f}%`")
                     st.write(f"- Expected Valuation ($E[X]$): `{selected_contract['ev']:.3f}`")
                     st.write(f"- Volatility Index (IV): `{selected_contract['iv']*100:.1f}%` | Daily Theta: `-{abs(selected_contract['theta']):.3f}`")
+                    st.write(f"- Bid-Ask Spread: `${selected_contract['spread']:.2f}` ({selected_contract['spread_pct']:.1f}%)")
                     
                     st.markdown("""
                     <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
@@ -575,21 +593,33 @@ if st.session_state.price and st.session_state.expiries:
                     • <b>Delta Proxy:</b> Estimated chance this contract finishes in the money at expiration.<br>
                     • <b>Touch Probability:</b> Likelihood the stock price touches this strike before expiry.<br>
                     • <b>Expected Value ($E[X]$):</b> Net profit expectancy. Positive = favorable risk-reward.<br>
-                    • <b>Daily Theta:</b> Premium value lost each day from time decay.
+                    • <b>Daily Theta:</b> Premium value lost each day from time decay.<br>
+                    • <b>Bid-Ask Spread:</b> Transaction cost. Higher spread = more slippage.
                     </div>
                     """, unsafe_allow_html=True)
                     
                     st.write("")
-                    h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
-                    if not h_chart.empty: 
-                        st.line_chart(h_chart['Close'])
+                    
+                    # Get historical data for the contract symbol and plot price + volume
+                    try:
+                        h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
+                        if not h_chart.empty:
+                            st.caption("📈 Contract Price History (Last 30 days)")
+                            st.line_chart(h_chart['Close'])
+                            
+                            # Add volume chart below the price chart
+                            if 'Volume' in h_chart.columns and h_chart['Volume'].sum() > 0:
+                                st.caption("📊 Daily Trading Volume (Last 30 days)")
+                                st.bar_chart(h_chart['Volume'])
+                            else:
+                                st.info("Volume history not available for this contract")
+                    except:
+                        st.caption("Historical chart data unavailable for this specific contract")
 
-    # Map strategies into isolated tiers 
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
     process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
 
-    # Technical Analysis Verdict Core block
     with t_tech:
         if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
             df_tech = st.session_state.hist_data.copy()
@@ -629,7 +659,6 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
-    # --- AI RESEARCH TAB (Now with Finnhub news + Groq AI) ---
     with t_ai:
         c1, c2 = st.columns([4, 1])
         with c1: 
@@ -637,7 +666,6 @@ if st.session_state.price and st.session_state.expiries:
             st.caption("Powered by Finnhub news + Groq Llama 3.3 70B (auto-retry on rate limits)")
         with c2:
             if st.button("🔄 Refresh News", use_container_width=True):
-                # Clear cache for this ticker on manual refresh
                 cache_key = f"news_summary_{st.session_state.current_ticker}"
                 if cache_key in st.session_state.ai_cache.cache:
                     del st.session_state.ai_cache.cache[cache_key]
@@ -650,7 +678,6 @@ if st.session_state.price and st.session_state.expiries:
         
         st.markdown(st.session_state.ai_brief)
 
-    # Built out Strategy Guide Master Encyclopedia
     with t_edu:
         st.header("📖 System Strategy Guide & Indicator Dictionary")
         st.markdown("Welcome to the complete manual documentation. Below is the full breakdown of how our metrics work, what they mean, and how to execute positions.")
@@ -663,6 +690,20 @@ if st.session_state.price and st.session_state.expiries:
         * **`STRUCTURAL BUY INSTANCE`**: High mathematical conviction. It implies that your chosen option benefits from an excellent trend, strong probability metrics, and favorable options pricing.
         * **`WEAK EDGE PATTERN`**: Moderate caution. There is a statistical edge favoring a profitable outcome, but indicators are mixed. Position size should be scaled down to minimize exposure.
         * **`NEGATIVE EXPECTANCY AVOID`**: Severe statistical disadvantage. Over a large sample size, playing this exact contract layout loses money due to excessive time decay, high overpricing, or bad trend health.
+        """)
+        
+        st.divider()
+        
+        st.subheader("💧 Liquidity Indicators (NEW!)")
+        st.markdown("""
+        * **Volume Today**: Number of contracts traded today. Higher volume = easier to enter/exit.
+        * **Open Interest**: Total outstanding contracts. Rising OI = new money flowing in.
+        * **Bid-Ask Spread**: Difference between buy and sell prices. Tight spreads (<5%) indicate good liquidity.
+        * **Liquidity Warnings**: 
+            - 🔴 **EXTREMELY ILLIQUID** (<10 volume) - DO NOT TRADE
+            - 🟠 **LOW LIQUIDITY** (<50 volume) - Exercise extreme caution
+            - 🟡 **MODERATE LIQUIDITY** (<200 volume) - Acceptable for smaller positions
+            - 🟢 **HIGHLY LIQUID** (200+ volume) - Ideal trading conditions
         """)
         
         st.divider()
