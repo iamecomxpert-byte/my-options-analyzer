@@ -797,8 +797,8 @@ if st.session_state.price and st.session_state.expiries:
         
         st.markdown(st.session_state.ai_brief)
 
-        # ========================
-    # PORTFOLIO TAB (CORRECTED - Uses Option Price, Not Stock Price)
+     # ========================
+    # PORTFOLIO TAB (Expandable Positions + Confirmation Dialog)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -951,7 +951,7 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # --- DISPLAY ACTIVE POSITIONS (CORRECTED) ---
+        # --- DISPLAY ACTIVE POSITIONS (EXPANDABLE) ---
         st.subheader("📊 Active Positions")
         positions = get_portfolio_positions(selected_trader)
         
@@ -962,107 +962,152 @@ if st.session_state.price and st.session_state.expiries:
         
         if positions:
             for idx, (row_idx, pos) in enumerate(positions):
-                with st.container():
-                    st.markdown(f"---")
-                    col1, col2, col3 = st.columns([2, 2, 1])
+                entry_price = float(pos['entry_price'])
+                contracts = int(pos['contracts'])
+                strike = float(pos['strike'])
+                ticker = pos['ticker']
+                expiry_date_str = pos['expiry']
+                target = float(pos['target_price'])
+                stop = float(pos['stop_loss'])
+                
+                # Get current option price
+                option_price, current_iv = get_current_option_price(ticker, expiry_date_str, strike)
+                
+                if option_price and option_price > 0:
+                    # Calculate P&L
+                    pnl = (option_price - entry_price) * contracts * 100
+                    pnl_pct = ((option_price - entry_price) / entry_price) * 100
                     
-                    entry_price = float(pos['entry_price'])
-                    contracts = int(pos['contracts'])
+                    # Determine recommendation for icon
+                    if option_price <= stop:
+                        rec_icon = "🔴"
+                        rec_text = "SELL"
+                    elif option_price >= target:
+                        rec_icon = "🟢"
+                        rec_text = "PROFIT"
+                    elif option_price >= target * 0.8:
+                        rec_icon = "🟡"
+                        rec_text = "PARTIAL"
+                    else:
+                        rec_icon = "🔵"
+                        rec_text = "HOLD"
                     
-                    with col1:
-                        st.markdown(f"**{pos['ticker']} ${float(pos['strike']):.2f} Call**")
-                        st.caption(f"Expiry: {pos['expiry']}")
-                        st.caption(f"Contracts: {contracts} @ ${entry_price:.2f}")
-                        st.caption(f"Target: ${float(pos['target_price']):.2f} | Stop: ${float(pos['stop_loss']):.2f}")
-                        st.caption(f"Cutoff: {pos['cutoff_date']}")
+                    # Summary line for expander header
+                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | Current: ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | {rec_text}"
                     
-                    with col2:
-                        try:
-                            # Get CURRENT OPTION PRICE (not stock price!)
-                            option_price, current_iv = get_current_option_price(
-                                pos['ticker'], 
-                                pos['expiry'], 
-                                float(pos['strike'])
-                            )
-                            
-                            if option_price and option_price > 0:
-                                # Calculate P&L based on option price
-                                days_left = max((pd.to_datetime(pos['expiry']).date() - datetime.now().date()).days, 0)
-                                
-                                # Get current delta for recommendation
-                                stock = yf.Ticker(pos['ticker'])
-                                current_stock_price = stock.history(period="1d")['Close'].iloc[-1]
-                                
-                                if current_iv:
-                                    d, _, _, _ = calculate_greeks(
-                                        current_stock_price, 
-                                        float(pos['strike']), 
-                                        max(days_left, 1) / 365, 
-                                        0.05, 
-                                        current_iv
-                                    )
-                                    current_delta = d
-                                else:
-                                    current_delta = 0.5
-                                
-                                # Calculate P&L
-                                pnl = (option_price - entry_price) * contracts * 100
-                                pnl_pct = ((option_price - entry_price) / entry_price) * 100
-                                
-                                st.metric("Current Option Price", f"${option_price:.2f}", 
-                                         delta=f"{pnl_pct:+.1f}%", 
-                                         delta_color="normal")
-                                
-                                if pnl >= 0:
-                                    st.caption(f"💰 P&L: +${pnl:.0f}")
-                                else:
-                                    st.caption(f"💰 P&L: -${abs(pnl):.0f}")
-                                
-                                # Get recommendation based on option price
-                                target = float(pos['target_price'])
-                                stop = float(pos['stop_loss'])
-                                
-                                if option_price <= stop:
-                                    recommendation = "🔴 SELL IMMEDIATELY"
-                                    reason = f"Stop loss hit at ${stop:.2f} (Current: ${option_price:.2f})"
-                                elif option_price >= target:
-                                    recommendation = "🟢 TAKE PROFIT"
-                                    reason = f"Target reached at ${target:.2f} (Current: ${option_price:.2f})"
-                                elif option_price >= target * 0.8:
-                                    recommendation = "🟡 PARTIAL PROFIT"
-                                    reason = f"80% of target reached. Consider taking partial profits."
-                                elif days_left < 7:
-                                    recommendation = "🟠 EXIT SOON"
-                                    reason = f"Only {days_left} days left. Time decay accelerating."
-                                elif current_delta < 0.25:
-                                    recommendation = "🟠 EXIT"
-                                    reason = f"Delta dropped to {current_delta:.2f}. Probability decreased."
-                                elif pnl_pct > 0 and pnl_pct < 20 and current_delta > 0.45:
-                                    recommendation = "🟢 ADD MORE"
-                                    reason = f"Position is working. Consider adding at ${option_price:.2f}"
-                                else:
-                                    recommendation = "🔵 HOLD"
-                                    reason = f"Target: ${target:.2f}, Stop: ${stop:.2f}, Current: ${option_price:.2f}"
-                                
-                                if "SELL" in recommendation or "EXIT" in recommendation:
-                                    st.error(f"**{recommendation}**")
-                                elif "PROFIT" in recommendation:
-                                    st.success(f"**{recommendation}**")
-                                elif "ADD" in recommendation:
-                                    st.info(f"**{recommendation}**")
-                                else:
-                                    st.info(f"**{recommendation}**")
-                                st.caption(reason)
-                                st.caption(f"Days left: {days_left} | Delta: {current_delta:.2f}")
-                            else:
-                                st.warning("Option price data unavailable")
-                        except Exception as e:
-                            st.caption(f"⚠️ Data error: {str(e)[:50]}")
+                    # Create expander for this position
+                    with st.expander(summary):
+                        # Get additional metrics for expanded view
+                        days_left = max((pd.to_datetime(expiry_date_str).date() - datetime.now().date()).days, 0)
                         
-                    with col3:
-                        if st.button("❌ Close", key=f"close_{idx}", use_container_width=True):
-                            close_position(row_idx)
-                            st.rerun()
+                        # Get current delta and IV
+                        try:
+                            stock = yf.Ticker(ticker)
+                            current_stock_price = stock.history(period="1d")['Close'].iloc[-1]
+                            
+                            if current_iv:
+                                d, g, t, v = calculate_greeks(
+                                    current_stock_price, 
+                                    strike, 
+                                    max(days_left, 1) / 365, 
+                                    0.05, 
+                                    current_iv
+                                )
+                                current_delta = d
+                                current_gamma = g
+                                current_theta = t
+                                current_vega = v
+                            else:
+                                current_delta = 0.5
+                                current_gamma = 0
+                                current_theta = 0
+                                current_vega = 0
+                        except:
+                            current_delta = 0.5
+                            current_gamma = 0
+                            current_theta = 0
+                            current_vega = 0
+                        
+                        # Touch probability
+                        touch_prob = min(current_delta * 2, 0.99)
+                        
+                        # Calculate current EV
+                        pot_profit = option_price * (1 + st.session_state.profit_target_pct / 100)
+                        pot_loss = option_price * (st.session_state.stop_loss_pct / 100)
+                        current_ev = (touch_prob * pot_profit) - ((1 - touch_prob) * pot_loss)
+                        
+                        # Display detailed metrics in columns
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.markdown("**📋 Position Details**")
+                            st.write(f"Entry Price: ${entry_price:.2f}")
+                            st.write(f"Contracts: {contracts}")
+                            st.write(f"Total Cost: ${entry_price * contracts * 100:.2f}")
+                            st.write(f"Days Left: {days_left}")
+                        
+                        with col2:
+                            st.markdown("**🎯 Targets**")
+                            st.write(f"Target: ${target:.2f} ({st.session_state.profit_target_pct}% above)")
+                            st.write(f"Stop: ${stop:.2f} ({st.session_state.stop_loss_pct}% below)")
+                            st.write(f"Cutoff Date: {pos['cutoff_date']}")
+                            st.write(f"Current vs Target: {(option_price / target * 100):.0f}%")
+                        
+                        with col3:
+                            st.markdown("**📊 Greeks & Probabilities**")
+                            st.write(f"Delta: {current_delta:.3f}")
+                            st.write(f"Gamma: {current_gamma:.4f}")
+                            st.write(f"Theta: {current_theta:.3f}")
+                            st.write(f"Vega: {current_vega:.3f}")
+                        
+                        st.divider()
+                        
+                        col4, col5 = st.columns(2)
+                        with col4:
+                            st.markdown("**📈 Probability Metrics**")
+                            st.write(f"Touch Probability: {touch_prob * 100:.1f}%")
+                            st.write(f"Current Expected Value (EV): ${current_ev:.2f}")
+                            st.write(f"IV: {current_iv * 100:.1f}%" if current_iv else "IV: N/A")
+                        
+                        with col5:
+                            # Recommendation reason
+                            st.markdown("**💡 Recommendation Details**")
+                            if option_price <= stop:
+                                st.error(f"Stop loss hit at ${stop:.2f}. Exit immediately.")
+                            elif option_price >= target:
+                                st.success(f"Target reached at ${target:.2f}. Take profits now.")
+                            elif option_price >= target * 0.8:
+                                st.warning(f"80% of target reached (${option_price:.2f} / ${target:.2f}). Consider partial exit.")
+                            elif days_left < 7:
+                                st.warning(f"Only {days_left} days left. Time decay accelerating. Exit soon.")
+                            elif current_delta < 0.25:
+                                st.warning(f"Delta dropped to {current_delta:.2f}. Probability decreased. Consider exit.")
+                            elif pnl_pct > 0 and pnl_pct < 20 and current_delta > 0.45:
+                                st.info(f"Position working (+{pnl_pct:.0f}%). Consider adding more at ${option_price:.2f}")
+                            else:
+                                st.info(f"Position intact. Target: ${target:.2f}, Stop: ${stop:.2f}")
+                        
+                        st.divider()
+                        
+                        # Close button with confirmation
+                        st.markdown("**⚠️ Position Management**")
+                        confirm_key = f"confirm_close_{idx}"
+                        if st.checkbox("Confirm close position", key=confirm_key):
+                            if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
+                                close_position(row_idx)
+                                st.success(f"✅ Position {ticker} ${strike:.2f} Call closed!")
+                                time.sleep(1)
+                                st.rerun()
+                else:
+                    # Fallback when option price unavailable
+                    with st.expander(f"⚠️ {ticker} ${strike:.2f} Call | Data unavailable"):
+                        st.warning(f"Option price data not available for {ticker} {strike} on {expiry_date_str}")
+                        confirm_key = f"confirm_close_{idx}"
+                        if st.checkbox("Confirm close position", key=confirm_key):
+                            if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
+                                close_position(row_idx)
+                                st.success(f"Position {ticker} ${strike:.2f} Call closed!")
+                                st.rerun()
         else:
             st.info(f"No active positions for {selected_trader}. Add a position below.")
         
