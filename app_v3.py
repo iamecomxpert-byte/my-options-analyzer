@@ -11,12 +11,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 
-# --- PAGE CONFIG MUST BE FIRST ---
-st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
-
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
-    def __init__(self, ttl_seconds=300):
+    def __init__(self, ttl_seconds=300):  # 5 minute TTL
         self.cache = {}
         self.ttl = ttl_seconds
     
@@ -35,9 +32,10 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
-# --- GOOGLE SHEETS CONNECTION ---
+# --- GOOGLE SHEETS CONNECTION (NEW) ---
 @st.cache_resource
 def get_google_sheet():
+    """Connect to Google Sheets using service account credentials."""
     try:
         creds_json = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
         creds_dict = json.loads(creds_json)
@@ -51,8 +49,8 @@ def get_google_sheet():
         st.error(f"Failed to connect to Google Sheets: {str(e)}")
         return None
 
-# --- PORTFOLIO FUNCTIONS ---
 def init_portfolio_sheet():
+    """Initialize the portfolio sheet if it doesn't exist."""
     sheet = get_google_sheet()
     if not sheet:
         return None
@@ -70,6 +68,7 @@ def init_portfolio_sheet():
 
 def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_price, 
                           entry_iv, entry_delta, target_price, stop_loss, cutoff_date):
+    """Add a new position to Google Sheets."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return False
@@ -83,6 +82,7 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     return True
 
 def get_portfolio_positions(trader_name=None):
+    """Get all active portfolio positions, optionally filtered by trader name."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return []
@@ -96,12 +96,33 @@ def get_portfolio_positions(trader_name=None):
     return positions
 
 def close_position(row_index):
+    """Mark a position as closed."""
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return
     worksheet.update_cell(row_index + 2, 13, "closed")
 
+def get_trader_list():
+    """Get unique trader names from the portfolio sheet."""
+    worksheet = init_portfolio_sheet()
+    if not worksheet:
+        return ["Mukul"]  # Default trader
+    
+    records = worksheet.get_all_records()
+    traders = set()
+    for record in records:
+        if record.get('trader_name'):
+            traders.add(record['trader_name'])
+    
+    # Always include Mukul as default
+    traders.add("Mukul")
+    
+    if not traders:
+        return ["Mukul"]
+    return sorted(list(traders))
+
 def get_position_recommendation(position, current_price, current_iv, current_delta, days_left):
+    """Generate recommendation for a single position."""
     entry = float(position['entry_price'])
     current = current_price
     target = float(position['target_price'])
@@ -125,6 +146,7 @@ def get_position_recommendation(position, current_price, current_iv, current_del
 
 # --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
+    """Call Groq with exponential backoff retry logic."""
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -142,7 +164,7 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
             if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
                 if attempt < max_retries - 1:
                     wait_time = base_delay * (2 ** attempt)
-                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds...")
+                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -162,7 +184,14 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
     return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
 
+def bs_price(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0 or S <= 0: return max(0, S-K)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+
 def calculate_p_touch(S, K, T, sigma):
+    """Calculates the probability of touching the strike price before expiration."""
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
     d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     p_itm = norm.cdf(d1) if S < K else 1.0 - norm.cdf(d1)
@@ -173,25 +202,32 @@ def calculate_p_touch(S, K, T, sigma):
 def get_technicals(df):
     df['ema8'] = df['Close'].ewm(span=8, adjust=False).mean()
     df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema12 - ema26
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
+    
     df['sma20'] = df['Close'].rolling(window=20).mean()
     df['std20'] = df['Close'].rolling(window=20).std()
     df['upper'] = df['sma20'] + (df['std20'] * 2)
     df['lower'] = df['sma20'] - (df['std20'] * 2)
+    
     return df.iloc[-1], df.iloc[-2]
 
-# --- FETCH NEWS FROM FINNHUB ---
+# --- FETCH NEWS FROM FINNHUB (RELIABLE, WORKING LINKS) ---
 def fetch_news_finnhub(ticker):
+    """Fetch latest news for a ticker using Finnhub API - working links guaranteed."""
     api_key = st.secrets.get("FINNHUB_API_KEY")
     if not api_key:
+        st.warning("⚠️ FINNHUB_API_KEY not found in secrets. News will be unavailable.")
         return None
+    
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=7)
+        
         url = "https://finnhub.io/api/v1/company-news"
         params = {
             'symbol': ticker,
@@ -199,12 +235,18 @@ def fetch_news_finnhub(ticker):
             'to': end_date.strftime('%Y-%m-%d'),
             'token': api_key
         }
+        
         response = requests.get(url, params=params)
+        
         if response.status_code != 200:
+            st.warning(f"Finnhub API error: {response.status_code}")
             return None
+        
         articles = response.json()
+        
         if not articles:
             return None
+        
         formatted_news = []
         for item in articles[:8]:
             formatted_news.append({
@@ -216,51 +258,86 @@ def fetch_news_finnhub(ticker):
             })
         return formatted_news
     except Exception as e:
+        st.warning(f"Could not fetch news: {str(e)[:100]}")
         return None
 
-# --- AI RESEARCH ENGINE ---
+# --- AI RESEARCH ENGINE (Finnhub News + Groq AI) ---
 def get_ai_research(ticker):
     groq_api_key = st.secrets.get("GROQ_API_KEY")
+    finnhub_api_key = st.secrets.get("FINNHUB_API_KEY")
+    
+    if not groq_api_key:
+        return "⚠️ Please add GROQ_API_KEY to Streamlit Secrets."
+    
+    if not finnhub_api_key:
+        return "⚠️ Please add FINNHUB_API_KEY to Streamlit Secrets."
+    
     cache_key = f"news_summary_{ticker}"
     cached_response = st.session_state.ai_cache.get(cache_key)
     if cached_response:
         return cached_response
+    
     news_articles = fetch_news_finnhub(ticker)
+    
     if not news_articles:
-        return f"ℹ️ No recent news found for {ticker}"
+        return f"ℹ️ No recent news found for {ticker} in the last 7 days."
+    
     news_text = "\n\n".join([
         f"**News {i+1}** (Source: {item['publisher']}, Time: {item['datetime']})\n"
         f"Title: {item['title']}\n"
-        f"Summary: {item['summary']}"
+        f"Summary: {item['summary']}\n"
+        f"Link: {item['link']}"
         for i, item in enumerate(news_articles)
     ])
+    
     prompt = f"""
-    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker}.
+    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker} from the last 7 days.
     
     NEWS ARTICLES:
     {news_text}
     
     Based ONLY on these news articles, provide a concise analysis:
-    1. **Analyst Consensus**
-    2. **Key Catalysts**
-    3. **Sentiment Drivers**
-    4. **Actionable View** (Bullish/Neutral/Cautious)
+    
+    1. **Analyst Consensus**: What are analysts saying? (price targets, upgrades/downgrades if mentioned)
+    2. **Key Catalysts**: Upcoming events, earnings dates, product launches mentioned
+    3. **Sentiment Drivers**: Top 3 themes from the last 7 days
+    4. **Actionable View**: Based strictly on this news flow, give a "Bullish", "Neutral", or "Cautious" rating with 1-sentence reasoning
+    
+    Keep it factual and concise. Do not invent information not in the articles.
     """
+    
     try:
         client = Groq(api_key=groq_api_key)
         response_text = call_groq_with_retry(client, prompt)
+        
         if response_text is None:
-            result = f"### 📰 Recent News for {ticker}\n\n"
+            fallback = f"### 📰 Recent News for {ticker}\n\n"
+            fallback += "*(AI summary temporarily unavailable due to rate limits. Here are the raw headlines:)*\n\n"
             for i, item in enumerate(news_articles[:5]):
-                result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']}\n\n"
+                fallback += f"**{i+1}. {item['title']}**  \n"
+                fallback += f"📌 Source: {item['publisher']} | 🕐 {item['datetime']}  \n"
+                fallback += f"🔗 [Read full article]({item['link']})  \n\n"
+            fallback += "---\n*💡 Tip: Click 'Refresh News' in 30-60 seconds to try AI summary again.*"
+            result = fallback
         else:
-            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}"
+            sources_text = "\n".join([f"- [{item['title']}]({item['link']}) ({item['publisher']})" for item in news_articles[:5]])
+            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}\n\n---\n### 🔗 Sources\n{sources_text}\n\n*📌 Data provided by Finnhub.io*"
+        
         st.session_state.ai_cache.set(cache_key, result)
         return result
+        
     except Exception as e:
-        return f"News unavailable"
+        fallback = f"### 📰 Recent News for {ticker}\n\n"
+        fallback += "*(AI service unavailable. Here are the latest headlines:)*\n\n"
+        for i, item in enumerate(news_articles[:5]):
+            fallback += f"**{i+1}. {item['title']}**  \n"
+            fallback += f"📌 {item['publisher']} | 🕐 {item['datetime']}  \n"
+            fallback += f"🔗 [Read full article]({item['link']})  \n\n"
+        return fallback
 
-# --- SESSION STATE INITIALIZATION ---
+# --- PAGE CONFIG & SESSION STATE ---
+st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
+
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
@@ -300,7 +377,7 @@ if fetch_btn:
         hist = stock_obj.history(period="100d")
         
         if hist.empty or 'Close' not in hist.columns:
-            st.error(f"❌ No valid history found for {ticker_input}")
+            st.error(f"❌ No valid history found for {ticker_input}. Symbol may be incorrect.")
             st.session_state.price = None
         else:
             st.session_state.hist_data = hist
@@ -328,7 +405,7 @@ if fetch_btn:
             aggr_candidates = []
             spec_candidates = []
             
-            with st.spinner("Processing options chain..."):
+            with st.spinner("Processing mathematical matrix across options chain..."):
                 for exp_date in valid_global_expiries[:6]:
                     try:
                         opt_chain = stock_obj.option_chain(exp_date).calls
@@ -373,7 +450,49 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Sidebar expiry selector (this stays!)
+    # Updated tabs to include Portfolio as 8th tab
+    t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
+        "📋 Global Recommendations", "🛡️ Conservative Buy", "⚡ Aggressive Buy", 
+        "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Research", 
+        "📂 Portfolio", "📖 Strategy Guide"
+    ])
+
+    with t_summary:
+        st.subheader("🏁 Automated Quantitative Trading Dashboard")
+        st.markdown("This panel displays the mathematically optimal contract selection across the *entire chain life* matching our risk filters (>= 60 Days Expiry).")
+        
+        sum_data = []
+        profiles = [
+            ("🛡️ Conservative Buy", st.session_state.global_conservative, "50-60%"),
+            ("⚡ Aggressive Buy", st.session_state.global_aggressive, "40-49%"),
+            ("🎰 Speculative Buy", st.session_state.global_speculative, "30-39%")
+        ]
+        
+        for name, profile, target_d in profiles:
+            if profile:
+                t_exit = profile['mid'] * (1 + profit_target_pct / 100)
+                s_loss = profile['mid'] * (1 - stop_loss_pct / 100)
+                h_days = min(int(profile['days'] * 0.4), 45)
+                h_date = (datetime.now() + timedelta(days=h_days)).strftime('%b %d, %Y')
+                
+                sum_data.append({
+                    "Strategy Profile": name,
+                    "Target Delta": target_d,
+                    "Optimal Strike": f"${profile['strike']:.2f} Call",
+                    "Best Expiry Date": profile['expiry'],
+                    "Entry Target (Mid)": f"${profile['mid']:.2f}",
+                    "Take Profit Target": f"${t_exit:.2f}",
+                    "Stop Loss Target": f"${s_loss:.2f}",
+                    "Max Hold Time": f"{h_days} Days ({h_date})",
+                    "Composite Score": f"{profile['cts']}/100"
+                })
+        
+        if sum_data:
+            df_summary_table = pd.DataFrame(sum_data)
+            st.table(df_summary_table.set_index("Strategy Profile"))
+        else:
+            st.warning("No contracts met the strict mathematical baseline definitions across the processed options chain.")
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 Workspace Adjuster")
     expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
@@ -381,12 +500,10 @@ if st.session_state.price and st.session_state.expiries:
     T_years = max(days_to_expiry, 1) / 365
 
     if days_to_expiry < 60:
-        st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework.")
+        st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework recommendation rule.")
 
-    # Fetch Call Chain Options for selected expiry
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     
-    # Recalculate tech variables
     tech_score = 0
     verdict_reasons = []
     if not st.session_state.hist_data.empty:
@@ -394,15 +511,14 @@ if st.session_state.price and st.session_state.expiries:
         curr, prev = get_technicals(df_tech)
         if curr['ema8'] > curr['ema20']:
             tech_score += 1
-            verdict_reasons.append("Short-term momentum (8 EMA) is leading.")
+            verdict_reasons.append("Short-term momentum (8 EMA) is leading the long-term trend.")
         if curr['hist'] > prev['hist']:
             tech_score += 1
-            verdict_reasons.append("MACD histogram is rising.")
+            verdict_reasons.append("MACD histogram is rising, indicating selling pressure is exhausting or buying is accelerating.")
         if S > curr['sma20']:
             tech_score += 1
-            verdict_reasons.append("Price is above 20-day baseline.")
+            verdict_reasons.append("Price is holding above the 20-day baseline (Middle Bollinger Band).")
 
-    # --- THE STRATEGY PROCESSING FUNCTION (FULLY RESTORED) ---
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
             all_available_contracts = []
@@ -412,6 +528,7 @@ if st.session_state.price and st.session_state.expiries:
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
                 
+                # Extract volume and liquidity data
                 volume = row.get('volume', 0)
                 open_interest = row.get('openInterest', 0)
                 bid = row.get('bid', 0)
@@ -426,21 +543,26 @@ if st.session_state.price and st.session_state.expiries:
                 ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
                 cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
                 
+                # Determine liquidity status
                 if volume < 10:
                     liquidity_status = "🔴 EXTREMELY ILLIQUID"
+                    liquidity_warning = "Less than 10 contracts traded today. AVOID - you won't be able to exit."
                 elif volume < 50:
                     liquidity_status = "🟠 LOW LIQUIDITY"
+                    liquidity_warning = "Low volume. Wide spreads likely. Exercise caution."
                 elif volume < 200:
                     liquidity_status = "🟡 MODERATE LIQUIDITY"
+                    liquidity_warning = "Acceptable for smaller positions."
                 else:
                     liquidity_status = "🟢 HIGHLY LIQUID"
+                    liquidity_warning = "Tight spreads, easy entry/exit."
                 
                 item = {
                     'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
                     'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 
                     'symbol': row['contractSymbol'], 'volume': volume, 'open_interest': open_interest,
                     'bid': bid, 'ask': ask, 'spread': spread, 'spread_pct': spread_pct,
-                    'liquidity_status': liquidity_status
+                    'liquidity_status': liquidity_status, 'liquidity_warning': liquidity_warning
                 }
                 
                 all_available_contracts.append(item)
@@ -448,7 +570,7 @@ if st.session_state.price and st.session_state.expiries:
                     tier_contracts.append(item)
             
             if not all_available_contracts:
-                st.error("No valid options contracts returned.")
+                st.error("No valid options contracts returned from data stream for this expiry.")
                 return
 
             if tier_contracts:
@@ -457,189 +579,279 @@ if st.session_state.price and st.session_state.expiries:
                 target_delta = (delta_min + delta_max) / 2
                 best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
             
-            # LOCKED RECOMMENDATION
+            # LOCKED RECOMMENDATION SECTION
             st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
+            st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
+            
+            # Add liquidity warning prominently if contract is illiquid
             if best_contract['volume'] < 50:
-                st.warning(f"{best_contract['liquidity_status']}: Low volume - exercise caution")
+                st.warning(f"{best_contract['liquidity_status']}: {best_contract['liquidity_warning']}")
             
             reco_exit = best_contract['mid'] * (1 + profit_target_pct / 100)
             reco_stop = best_contract['mid'] * (1 - stop_loss_pct / 100)
             reco_hold = min(int(days_to_expiry * 0.4), 45)
             reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
             
-            st.markdown(f"""
-            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1);">
-                <h4 style="margin-top:0;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
-                <table style="width:100%;">
-                    <tr><td><b>Composite Score:</b></td><td>{best_contract['cts']}/100</td>
-                        <td><b>Entry:</b></td><td>${best_contract['mid']:.2f}</td></tr>
-                    <tr><td><b>Target:</b></td><td>${reco_exit:.2f}</td>
-                        <td><b>Stop:</b></td><td>${reco_stop:.2f}</td></tr>
-                    <tr><td><b>Hold Limit:</b></td><td>{reco_hold} Days</td>
-                        <td><b>Cutoff:</b></td><td>{reco_date}</td></tr>
-                    <tr><td><b>Volume:</b></td><td>{best_contract['volume']:,}</td>
-                        <td><b>OI:</b></td><td>{best_contract['open_interest']:,}</td></tr>
+            reco_html = f"""
+            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
+                <h4 style="margin-top:0; color:#4CAF50;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
+                <table style="width:100%; border:none; color:inherit; margin-top:10px;">
+                    <tr>
+                        <td><b>Composite Score:</b></td>
+                        <td>{best_contract['cts']}/100</td>
+                        <td><b>Entry Mid Price:</b></td>
+                        <td>${best_contract['mid']:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Take Profit Target:</b></td>
+                        <td>${reco_exit:.2f}</td>
+                        <td><b>Stop Loss Point:</b></td>
+                        <td>${reco_stop:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Max Hold Limit:</b></td>
+                        <td>{reco_hold} Days</td>
+                        <td><b>Calendar Cutoff Date:</b></td>
+                        <td>{reco_date}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Volume Today:</b></td>
+                        <td>{best_contract['volume']:,} contracts</td>
+                        <td><b>Open Interest:</b></td>
+                        <td>{best_contract['open_interest']:,}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Bid-Ask Spread:</b></td>
+                        <td>${best_contract['spread']:.2f} ({best_contract['spread_pct']:.1f}%)</td>
+                        <td><b>Liquidity:</b></td>
+                        <td>{best_contract['liquidity_status']}</td>
+                    </tr>
                 </table>
             </div>
-            """, unsafe_allow_html=True)
+            """
+            st.markdown(reco_html, unsafe_allow_html=True)
             
+            # DIVIDER
             st.divider()
             
             # COMPARISON SECTION
             st.markdown("### 🔍 Compare Other Strikes")
+            st.markdown("*Select any strike below to see how its mathematical metrics compare to the recommendation above*")
+            
             strike_list = sorted([item['strike'] for item in all_available_contracts])
-            default_index = strike_list.index(best_contract['strike'])
+            default_index = strike_list.index(best_contract['strike']) if best_contract['strike'] in strike_list else 0
             
-            selected_k = st.selectbox(f"Select Strike to Compare:", strike_list, index=default_index, key=f"compare_{tier_label}")
-            selected = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            selected_k = st.selectbox(
+                f"Select Strike to Analyze ({tier_label} Comparison):", 
+                strike_list, 
+                index=default_index, 
+                key=f"compare_{tier_label}_{expiry}"
+            )
             
-            if selected:
-                selected_exit = selected['mid'] * (1 + profit_target_pct / 100)
-                selected_stop = selected['mid'] * (1 - stop_loss_pct / 100)
+            selected_contract = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            
+            if selected_contract:
+                selected_exit = selected_contract['mid'] * (1 + profit_target_pct / 100)
+                selected_stop = selected_contract['mid'] * (1 - stop_loss_pct / 100)
+                selected_hold = min(int(days_to_expiry * 0.4), 45)
+                selected_date = (datetime.now() + timedelta(days=selected_hold)).strftime('%B %d, %Y')
+                
+                # Show liquidity warning for selected contract if illiquid
+                if selected_contract['volume'] < 50 and selected_k != best_contract['strike']:
+                    st.warning(f"⚠️ {selected_contract['liquidity_status']}: {selected_contract['liquidity_warning']}")
                 
                 st.markdown("### 📊 Mathematical Output Summary")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Composite Score", f"{selected['cts']}/100")
-                    st.metric("Entry", f"${selected['mid']:.2f}")
-                with col2:
-                    st.metric("Target", f"${selected_exit:.2f}")
-                    st.metric("Stop", f"${selected_stop:.2f}")
-                with col3:
-                    st.metric("Volume", f"{selected['volume']:,}")
-                    st.metric("OI", f"{selected['open_interest']:,}")
-                
-                st.write("**Greeks:**")
-                st.write(f"Delta: {selected['delta']:.3f} | Theta: {selected['theta']:.3f} | Vega: {selected['vega']:.3f}")
-                st.write(f"Touch Prob: {selected['p_touch']*100:.1f}% | EV: {selected['ev']:.3f}")
-                
-                # Price chart
-                try:
-                    h_chart = yf.Ticker(selected['symbol']).history(period="1mo")
-                    if not h_chart.empty:
-                        st.caption("📈 Price History (30 days)")
-                        st.line_chart(h_chart['Close'])
-                        if 'Volume' in h_chart.columns:
-                            st.caption("📊 Volume (30 days)")
-                            st.bar_chart(h_chart['Volume'])
-                except:
-                    pass
+                c1, c2, c3 = st.columns([1.5, 1.5, 2])
+                with c1:
+                    if selected_contract['cts'] >= 55 and selected_contract['ev'] > 0:
+                        st.success("✅ STRUCTURAL BUY INSTANCE")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> The odds are highly in your favor. The combination of healthy upward stock momentum, 
+                        a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    elif selected_contract['cts'] >= 40 and selected_contract['ev'] > 0:
+                        st.warning("⚠️ WEAK EDGE PATTERN")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> This option has a mathematical edge, but it is thin. Some charts are flashing mixed signals, 
+                        meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
+                        Statistically, playing these setups results in an outright loss over time.
+                        </p>
+                        """, unsafe_allow_html=True)
+                        
+                    st.metric("Composite Score", f"{selected_contract['cts']}/100")
+                    st.metric("Entry Target", f"${selected_contract['mid']:.2f}")
+                    
+                with c2:
+                    st.metric("Take Profit Target", f"${selected_exit:.2f}")
+                    st.metric("Stop Loss Point", f"${selected_stop:.2f}")
+                    st.write(f"⏱️ **Hold Cutoff:** `{selected_hold} days` ({selected_date})")
+                    st.metric("Volume Today", f"{selected_contract['volume']:,}")
+                    st.metric("Open Interest", f"{selected_contract['open_interest']:,}")
 
-    # TABS
-    t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
-        "📋 Global Recs", "🛡️ Conservative", "⚡ Aggressive", 
-        "🎰 Speculative", "📊 Technical", "🤖 AI Research", "📂 Portfolio", "📖 Strategy Guide"
-    ])
+                with c3:
+                    st.write("**Stochastic Engine Outputs**")
+                    st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{selected_contract['delta'] * 100:.1f}%`")
+                    st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{selected_contract['p_touch'] * 100:.1f}%`")
+                    st.write(f"- Expected Valuation ($E[X]$): `{selected_contract['ev']:.3f}`")
+                    st.write(f"- Volatility Index (IV): `{selected_contract['iv']*100:.1f}%` | Daily Theta: `-{abs(selected_contract['theta']):.3f}`")
+                    st.write(f"- Bid-Ask Spread: `${selected_contract['spread']:.2f}` ({selected_contract['spread_pct']:.1f}%)")
+                    
+                    st.markdown("""
+                    <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
+                    <b>📈 What these numbers mean:</b><br>
+                    • <b>Delta Proxy:</b> Estimated chance this contract finishes in the money at expiration.<br>
+                    • <b>Touch Probability:</b> Likelihood the stock price touches this strike before expiry.<br>
+                    • <b>Expected Value ($E[X]$):</b> Net profit expectancy. Positive = favorable risk-reward.<br>
+                    • <b>Daily Theta:</b> Premium value lost each day from time decay.<br>
+                    • <b>Bid-Ask Spread:</b> Transaction cost. Higher spread = more slippage.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.write("")
+                    
+                    # Get historical data for the contract symbol and plot price + volume
+                    try:
+                        h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
+                        if not h_chart.empty:
+                            st.caption("📈 Contract Price History (Last 30 days)")
+                            st.line_chart(h_chart['Close'])
+                            
+                            # Add volume chart below the price chart
+                            if 'Volume' in h_chart.columns and h_chart['Volume'].sum() > 0:
+                                st.caption("📊 Daily Trading Volume (Last 30 days)")
+                                st.bar_chart(h_chart['Volume'])
+                            else:
+                                st.info("Volume history not available for this contract")
+                    except:
+                        st.caption("Historical chart data unavailable for this specific contract")
 
-    # --- GLOBAL RECS TAB ---
-    with t_summary:
-        st.subheader("🏁 Automated Quantitative Trading Dashboard")
-        sum_data = []
-        profiles = [
-            ("🛡️ Conservative", st.session_state.global_conservative, "50-60%"),
-            ("⚡ Aggressive", st.session_state.global_aggressive, "40-49%"),
-            ("🎰 Speculative", st.session_state.global_speculative, "30-39%")
-        ]
-        for name, profile, target_d in profiles:
-            if profile:
-                t_exit = profile['mid'] * (1 + profit_target_pct / 100)
-                s_loss = profile['mid'] * (1 - stop_loss_pct / 100)
-                h_days = min(int(profile['days'] * 0.4), 45)
-                sum_data.append({
-                    "Strategy": name, "Delta": target_d, "Strike": f"${profile['strike']:.2f}",
-                    "Expiry": profile['expiry'], "Entry": f"${profile['mid']:.2f}",
-                    "Target": f"${t_exit:.2f}", "Score": f"{profile['cts']}/100"
-                })
-        if sum_data:
-            st.dataframe(pd.DataFrame(sum_data), use_container_width=True)
-
-    # --- STRATEGY TABS (Restored) ---
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
     process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
 
-    # --- TECHNICAL TAB ---
     with t_tech:
-        if not st.session_state.hist_data.empty:
-            st.subheader("Technical Indicators")
-            st.line_chart(st.session_state.hist_data[['Close']])
-            if tech_score == 3:
-                st.success("✅ BULLISH - All indicators aligned")
-            elif tech_score == 2:
-                st.warning("⚠️ MIXED - Exercise caution")
-            else:
-                st.error("❌ BEARISH - Avoid calls")
+        if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
+            df_tech = st.session_state.hist_data.copy()
+            curr, prev = get_technicals(df_tech)
+            
+            st.subheader("Momentum & Volatility Health")
+            c1, c2, c3 = st.columns(3)
+            
+            ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
+            c1.metric("8/20 EMA Status", ema_status, f"{curr['ema8'] - curr['ema20']:.2f} delta")
+            if curr['ema8'] > curr['ema20'] and prev['ema8'] <= prev['ema20']:
+                c1.success("🔥 JUST CROSSED BULLISH")
+            
+            macd_dir = "Improving" if curr['hist'] > prev['hist'] else "Fading"
+            c2.metric("MACD Momentum", macd_dir, f"{curr['hist']:.3f} hist")
+            
+            pos = "Upper Half" if S > curr['sma20'] else "Lower Half"
+            c3.metric("Bollinger Position", pos, f"{((S - curr['lower'])/(curr['upper'] - curr['lower']))*100:.1f}% Band")
+            if S > curr['upper']: c3.warning("⚠️ OVEREXTENDED (Above Upper Band)")
 
-    # --- AI RESEARCH TAB ---
+            st.divider()
+            st.line_chart(df_tech[['Close', 'ema8', 'ema20', 'upper', 'lower']])
+
+            st.subheader("🏁 Final Technical Verdict")
+            if tech_score == 3:
+                st.success("🎯 **VERDICT: INVEST.** All technical indicators are aligned for a bullish continuation.")
+            elif tech_score == 2:
+                st.warning("⚖️ **VERDICT: CAUTION.** Technicals are mixed. Consider a smaller position or wait for confirmation.")
+            else:
+                st.error("🛑 **VERDICT: STAY AWAY.** Momentum is bearish and the price structure is weak.")
+            
+            with st.expander("View Verdict Logic"):
+                for reason in verdict_reasons:
+                    st.write(f"- {reason}")
+                if tech_score < 2:
+                    st.write("- Multiple indicators show declining strength or bearish crossovers.")
+        else:
+            st.warning("⚠️ Technical analysis stream offline.")
+
     with t_ai:
-        if st.button("🔄 Refresh AI Analysis"):
-            st.session_state.ai_brief = ""
-            st.rerun()
+        c1, c2 = st.columns([4, 1])
+        with c1: 
+            st.subheader(f"📰 News & AI Analysis: {st.session_state.current_ticker}")
+            st.caption("Powered by Finnhub news + Groq Llama 3.3 70B (auto-retry on rate limits)")
+        with c2:
+            if st.button("🔄 Refresh News", use_container_width=True):
+                cache_key = f"news_summary_{st.session_state.current_ticker}"
+                if cache_key in st.session_state.ai_cache.cache:
+                    del st.session_state.ai_cache.cache[cache_key]
+                st.session_state.ai_brief = ""
+                st.rerun()
+        
         if not st.session_state.ai_brief:
-            with st.spinner("Fetching AI analysis..."):
+            with st.spinner("Fetching latest news and generating AI summary..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+        
         st.markdown(st.session_state.ai_brief)
 
-    # --- PORTFOLIO TAB ---
-        # --- PORTFOLIO TAB (UPDATED WITH ERROR HANDLING) ---
+    # ========================
+    # NEW PORTFOLIO TAB
+    # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
         
+        # Initialize Google Sheet connection
         if 'sheet_initialized' not in st.session_state:
             init_portfolio_sheet()
             st.session_state.sheet_initialized = True
         
-        # --- TRADER MANAGEMENT (Dynamic from Google Sheets) ---
-        def get_trader_list():
-            """Get unique trader names from the portfolio sheet."""
-            worksheet = init_portfolio_sheet()
-            if not worksheet:
-                return ["Trader 1", "Trader 2", "Trader 3"]
-            records = worksheet.get_all_records()
-            traders = set()
-            for record in records:
-                if record.get('trader_name'):
-                    traders.add(record['trader_name'])
-            if not traders:
-                traders = {"Trader 1", "Trader 2", "Trader 3"}
-            return sorted(list(traders))
+        # Trader selection - dynamically gets list from Google Sheets
+        trader_options = get_trader_list()
+        selected_trader = st.selectbox("Select Trader:", trader_options, key="trader_select")
         
-        # Option to add new trader on the fly
-        col_t1, col_t2 = st.columns([3, 1])
-        with col_t1:
-            trader_list = get_trader_list()
-            selected_trader = st.selectbox("Select Trader:", trader_list, key="trader_select")
-        with col_t2:
-            st.write("")
-            st.write("")
-            if st.button("➕ New Trader", key="add_trader_btn"):
+        # Option to add new trader
+        col_add1, col_add2 = st.columns([3, 1])
+        with col_add2:
+            if st.button("➕ Add New Trader", key="show_add_trader"):
                 st.session_state.show_new_trader = True
         
-        # Show input for new trader name
         if st.session_state.get('show_new_trader', False):
-            col_n1, col_n2 = st.columns([2, 1])
+            col_n1, col_n2, col_n3 = st.columns([2, 1, 1])
             with col_n1:
-                new_trader = st.text_input("Enter new trader name:", key="new_trader_name")
+                new_trader_name = st.text_input("New trader name:", key="new_trader_input")
             with col_n2:
-                st.write("")
-                st.write("")
-                if st.button("Save Trader", key="save_trader"):
-                    if new_trader and new_trader not in trader_list:
-                        st.session_state.new_trader_added = new_trader
-                        st.success(f"Trader '{new_trader}' added! Select from dropdown.")
-                        st.session_state.show_new_trader = False
-                        st.rerun()
+                if st.button("Save", key="save_new_trader"):
+                    if new_trader_name and new_trader_name not in trader_options:
+                        # Just add a dummy entry to save the name to sheet
+                        dummy_worksheet = init_portfolio_sheet()
+                        if dummy_worksheet:
+                            # Add a temporary placeholder row to save the trader name
+                            dummy_worksheet.append_row([
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                                new_trader_name, "PLACEHOLDER", 0, "2024-01-01", 
+                                0, 0, 0, 0, "2024-01-01", 0, 0, "inactive", "", ""
+                            ])
+                            st.success(f"Trader '{new_trader_name}' added! Select from dropdown.")
+                            st.session_state.show_new_trader = False
+                            st.rerun()
                     else:
                         st.error("Please enter a valid name")
+            with col_n3:
+                if st.button("Cancel", key="cancel_new_trader"):
+                    st.session_state.show_new_trader = False
+                    st.rerun()
         
         st.divider()
         
-        # --- DISPLAY ACTIVE POSITIONS ---
+        # Display active positions
         st.subheader("📊 Active Positions")
-        positions = get_portfolio_positions(selected_trader if selected_trader != "Admin" else None)
+        positions = get_portfolio_positions(selected_trader)
         
-        col_r1, col_r2 = st.columns([1, 4])
-        with col_r1:
+        col_refresh, _ = st.columns([1, 5])
+        with col_refresh:
             if st.button("🔄 Refresh", key="refresh_portfolio", use_container_width=True):
                 st.rerun()
         
@@ -654,6 +866,7 @@ if st.session_state.price and st.session_state.expiries:
                         st.caption(f"Expiry: {pos['expiry']}")
                         st.caption(f"Contracts: {pos['contracts']} @ ${float(pos['entry_price']):.2f}")
                         st.caption(f"Target: ${float(pos['target_price']):.2f} | Stop: ${float(pos['stop_loss']):.2f}")
+                        st.caption(f"Cutoff: {pos['cutoff_date']}")
                     
                     with col2:
                         try:
@@ -706,29 +919,20 @@ if st.session_state.price and st.session_state.expiries:
                             st.caption(reason)
                             st.caption(f"Days left: {days_left} | Delta: {current_delta:.2f}")
                         except Exception as e:
-                            st.caption(f"⚠️ Data temporarily unavailable")
+                            st.caption(f"⚠️ Data temporarily unavailable: {str(e)[:50]}")
                         
                     with col3:
                         if st.button("❌ Close", key=f"close_{idx}", use_container_width=True):
                             close_position(row_idx)
                             st.rerun()
         else:
-            st.info(f"No active positions for {selected_trader}")
+            st.info(f"No active positions for {selected_trader}. Add a position below.")
         
         st.divider()
         
-        # --- ADD NEW POSITION (Safe auto-population) ---
+        # Add new position form
         st.subheader("➕ Add New Position")
-        
-        # Safely get the current ticker and expiry from session state or sidebar
-        current_ticker = st.session_state.get('current_ticker', 'SHOP')
-        # Check if expiry variable exists (it's defined after data fetch)
-        try:
-            current_expiry = expiry if 'expiry' in dir() else st.session_state.get('selected_expiry', datetime.now().date() + timedelta(days=60))
-        except:
-            current_expiry = datetime.now().date() + timedelta(days=60)
-        
-        st.caption(f"💡 Auto-filled from sidebar: Ticker = {current_ticker} | Selected Expiry = {current_expiry}")
+        st.caption(f"💡 Current selections from sidebar: Ticker = {st.session_state.current_ticker}, Expiry = {expiry}")
         
         with st.form("add_position_form"):
             col1, col2, col3 = st.columns(3)
@@ -736,7 +940,7 @@ if st.session_state.price and st.session_state.expiries:
             with col1:
                 ticker_pos = st.text_input(
                     "Ticker:", 
-                    value=current_ticker,
+                    value=st.session_state.current_ticker if st.session_state.current_ticker else "SHOP",
                     help="Auto-filled from sidebar. Change if needed."
                 ).upper()
                 
@@ -749,14 +953,9 @@ if st.session_state.price and st.session_state.expiries:
                 )
             
             with col2:
-                # Default expiry value
-                default_expiry = current_expiry if isinstance(current_expiry, (datetime, pd.Timestamp)) else datetime.now().date() + timedelta(days=60)
-                if isinstance(default_expiry, pd.Timestamp):
-                    default_expiry = default_expiry.date()
-                
                 expiry_pos = st.date_input(
                     "Expiry Date:", 
-                    value=default_expiry,
+                    value=pd.to_datetime(expiry).date() if 'expiry' in dir() else datetime.now().date() + timedelta(days=60),
                     min_value=datetime.now().date(),
                     help="Auto-filled from sidebar. Change if needed."
                 )
@@ -777,7 +976,7 @@ if st.session_state.price and st.session_state.expiries:
                     help="The price you paid per contract"
                 )
                 
-                # Auto-calculate targets
+                # Auto-calculate targets based on current adjusters
                 target_auto = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
                 stop_auto = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
                 
@@ -787,7 +986,7 @@ if st.session_state.price and st.session_state.expiries:
                 - Stop: ${stop_auto:.2f} ({st.session_state.stop_loss_pct}% below)
                 """)
             
-            # Calculate cutoff date
+            # Hidden auto-calculations
             cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
             cutoff_date = datetime.now().date() + timedelta(days=max(cutoff_days, 1))
             
@@ -837,19 +1036,367 @@ if st.session_state.price and st.session_state.expiries:
                         st.rerun()
                     else:
                         st.error("❌ Failed to save. Check Google Sheets connection.")
-    
-    # --- STRATEGY GUIDE TAB ---
-    with t_edu:
-        st.header("📖 Strategy Guide")
-        st.markdown("""
-        **Quick Reference:**
-        - 🟢 ADD MORE - Position profitable, add contracts
-        - 🔵 HOLD - Position intact, monitor
-        - 🟡 PARTIAL PROFIT - Take some off
-        - 🟢 TAKE PROFIT - Target reached, exit
-        - 🔴 SELL IMMEDIATELY - Stop loss hit
-        - 🟠 EXIT - Edge deteriorated
-        """)
 
+    # ========================
+    # STRATEGY GUIDE (UPDATED with Liquidity Guidelines)
+    # ========================
+    with t_edu:
+        st.header("📖 Complete Strategy Guide & Indicator Dictionary")
+        st.markdown("""
+        Welcome to the complete trading manual. This guide explains every indicator in the app and provides 
+        **actionable guidelines** on how to use them for real trading decisions.
+        """)
+        
+        st.divider()
+        
+        # SECTION 1: LIQUIDITY INDICATORS
+        st.subheader("💧 Liquidity Indicators - Your First Filter")
+        st.markdown("""
+        **Before looking at any other metric, check liquidity first. An option with great Greeks but no volume is a trap you cannot exit.**
+        """)
+        
+        with st.expander("📊 Volume Today - How to Use", expanded=False):
+            st.markdown("""
+            **What it measures:** Number of contracts traded in the current trading day.
+            
+            **Why it matters:** Volume = ability to enter and exit positions without excessive slippage.
+            
+            **Guidelines for Use:**
+            
+            | Volume | Rating | Action |
+            |--------|--------|--------|
+            | 200+ | 🟢 EXCELLENT | Safe to trade any position size |
+            | 100-199 | 🟡 GOOD | Acceptable for positions under 50 contracts |
+            | 50-99 | 🟠 CAUTION | Only for positions under 10 contracts |
+            | 10-49 | 🔴 DANGER | Avoid unless absolutely necessary |
+            | <10 | ⚫ TOXIC | NEVER TRADE - you won't exit |
+            
+            **How to use in trading:**
+            - Filter out any contract with volume < 50 automatically
+            - For larger positions (>20 contracts), require volume > 200
+            - Check volume relative to your intended position size
+            """)
+        
+        with st.expander("📈 Open Interest - What It Tells You", expanded=False):
+            st.markdown("""
+            **What it measures:** Total number of outstanding (unclosed) contracts.
+            
+            **Why it matters:** Open interest shows whether money is flowing into or out of a strike.
+            
+            **Guidelines for Use:**
+            - **Rising OI + Rising Price** = New long money entering -> Bullish signal
+            - **Rising OI + Falling Price** = New short money entering -> Bearish signal
+            - **Falling OI + Rising Price** = Shorts covering -> Potential rally ending
+            - **Falling OI + Falling Price** = Longs exiting -> More downside possible
+            
+            **Minimum thresholds:**
+            - Acceptable: OI > 500 contracts
+            - Good: OI > 1,000 contracts
+            - Excellent: OI > 5,000 contracts
+            
+            **How to use in trading:**
+            - Prefer strikes with OI > 500
+            - Avoid strikes where OI is dropping rapidly (liquidity drying up)
+            - Use OI changes to confirm directional bias
+            """)
+        
+        with st.expander("💰 Bid-Ask Spread - Your Real Transaction Cost", expanded=False):
+            st.markdown("""
+            **What it measures:** Difference between the highest buyer (bid) and lowest seller (ask) price.
+            
+            **Why it matters:** The spread is your immediate loss upon entry. Wide spreads destroy profitability.
+            
+            **Guidelines for Use:**
+            
+            **Spread Percentage Rule of Thumb:**
+            
+            | Spread % | Grade | Trading Implication |
+            |----------|-------|---------------------|
+            | < 2% | 🟢 EXCELLENT | Round-trip cost <4%. Ideal for all strategies. |
+            | 2-5% | 🟡 ACCEPTABLE | Round-trip cost 4-10%. OK for longer holds. |
+            | 5-10% | 🟠 WIDE | Cost 10-20%. Requires large move just to break even. |
+            | > 10% | 🔴 TOXIC | Cost >20%. Avoid at all costs. |
+            
+            **How to calculate spread %:**
+            
+            Spread % = (Ask - Bid) / Mid Price x 100
+            
+            **Real-world example:**
+            - Bid: $1.00, Ask: $1.10, Mid: $1.05
+            - Spread % = ($0.10 / $1.05) x 100 = 9.5%
+            - You lose 9.5% immediately upon entry (buy at $1.10, could only sell at $1.00)
+            
+            **How to use in trading:**
+            - **NEVER** enter with spread > 10%
+            - **ACCEPTABLE** for longer holds (30+ days) if spread < 5%
+            - **REQUIRE** spread < 3% for short-term trades (<14 days)
+            - Use limit orders, never market orders on wide spreads
+            - Calculate your breakeven including spread cost
+            """)
+        
+        with st.expander("🎯 Combined Liquidity Filter - The Rule of 3", expanded=False):
+            st.markdown("""
+            **The Rule of 3 Liquidity Check:**
+            
+            Before trading ANY option, verify all three conditions:
+            
+            1. **Volume > 50** (preferably > 200)
+            2. **Open Interest > 500** (preferably > 1,000)
+            3. **Spread < 5%** (preferably < 3%)
+            
+            **If any condition fails:** Move to the next strike or expiry.
+            
+            **Why this matters:** 
+            Illiquid options have hidden costs that destroy edge. A mathematically perfect trade with 10% spread is actually a losing trade.
+            
+            **Example:**
+            - Mathematical EV: +$50
+            - Spread cost (10% on $500 trade): -$50
+            - Real EV: $0 -> No edge, just paying the market maker
+            """)
+        
+        st.divider()
+        
+        # SECTION 2: CONVICTION INDICATORS
+        st.subheader("🎯 Conviction Indicators - Your Decision Framework")
+        
+        with st.expander("📊 Composite Score (CTS) - The Single Decision Number", expanded=False):
+            st.markdown("""
+            **What it measures:** A weighted combination of Delta (40%), Touch Probability (40%), and Technical Score (20%).
+            
+            **Why it matters:** One number that summarizes the trade's mathematical and technical strength.
+            
+            **Guidelines for Use:**
+            
+            | Score | Rating | Action |
+            |-------|--------|--------|
+            | 70-100 | 🟢 STRONG BUY | High conviction. Size position normally. |
+            | 55-69 | 🟡 MODERATE BUY | Positive edge. Consider smaller position. |
+            | 40-54 | 🟠 WEAK EDGE | Small or negative edge. Size down significantly. |
+            | <40 | 🔴 AVOID | Negative expectancy. Skip entirely. |
+            
+            **How to use in trading:**
+            - Use CTS as your primary filter
+            - Combine with liquidity check: CTS > 55 + Liquidity passes = Trade
+            - For spreads/iron condors, require CTS > 60
+            """)
+        
+        with st.expander("💰 Expected Value (EV) - Long-Term Profitability", expanded=False):
+            st.markdown("""
+            **What it measures:** (Touch Probability x Take Profit Value) - (Loss Probability x Stop Loss Value)
+            
+            **Why it matters:** Positive EV means the math favors you over many trades.
+            
+            **Guidelines for Use:**
+            - **EV > 0.50** -> Strong edge, trade with confidence
+            - **EV > 0.25** -> Moderate edge, trade with normal size
+            - **EV > 0** -> Small edge, size down or monitor
+            - **EV < 0** -> Negative edge, DO NOT TRADE regardless of other metrics
+            
+            **Note:** EV must be evaluated AFTER accounting for spread costs.
+            
+            Real EV = Mathematical EV - Spread Cost
+            """)
+        
+        st.divider()
+        
+        # SECTION 3: GREEKS
+        st.subheader("📊 Greeks - Understanding Your Risk Exposures")
+        
+        with st.expander("🎲 Delta (Δ) - Probability of Profit", expanded=False):
+            st.markdown("""
+            **What it measures:** Estimated probability the option expires in-the-money. Also measures price sensitivity ($0.01 move in stock = Delta x $0.01 change in option).
+            
+            **Guidelines by Strategy:**
+            
+            | Strategy Type | Target Delta | Risk Level |
+            |---------------|--------------|------------|
+            | Conservative | 0.50 - 0.60 | Lower risk, higher probability |
+            | Aggressive | 0.40 - 0.49 | Moderate risk, leveraged |
+            | Speculative | 0.30 - 0.39 | High risk, lottery-like |
+            
+            **How to use in trading:**
+            - Match delta to your risk tolerance
+            - Lower delta = cheaper option, less probability
+            - Higher delta = more expensive, higher probability
+            - As delta drops below 0.30, options behave like lottery tickets
+            """)
+        
+        with st.expander("⏱️ Theta (θ) - Time Decay Cost", expanded=False):
+            st.markdown("""
+            **What it measures:** Daily premium erosion from time passing.
+            
+            **Why it matters:** Theta is your daily cost of holding the option. High theta kills long positions.
+            
+            **Guidelines for Use:**
+            - **Daily theta as % of premium:**
+                - < 1% per day -> Manageable for long holds
+                - 1-2% per day -> Standard for 30-45 DTE
+                - 2-3% per day -> Expensive, needs fast move
+                - > 3% per day -> Too expensive, look for longer expiry
+            
+            **How to use in trading:**
+            - Calculate: Theta % = (Theta x 365) / Premium
+            - For longer holds (30+ days), prefer theta < 1.5% of premium
+            - Set hold duration based on theta: exit before theta accelerates (last 14 days)
+            """)
+        
+        with st.expander("📈 Vega (ν) - Volatility Exposure", expanded=False):
+            st.markdown("""
+            **What it measures:** Option price change for 1% change in implied volatility (IV).
+            
+            **Why it matters:** Vega tells you how much you're betting on volatility expansion.
+            
+            **Guidelines for Use:**
+            - **High Vega (>0.10)** -> Betting on volatility increase (earnings, events)
+            - **Low Vega (<0.05)** -> Volatility movement won't affect you much
+            
+            **How to use in trading:**
+            - Before earnings: Expect high Vega, IV is inflated (option expensive)
+            - Buy Vega when IV is low (30th percentile or lower)
+            - Avoid buying Vega when IV is high (70th percentile+)
+            """)
+        
+        with st.expander("📐 Gamma (Γ) - Acceleration Risk", expanded=False):
+            st.markdown("""
+            **What it measures:** Rate of change of Delta. How fast your position's probability changes as stock moves.
+            
+            **Why it matters:** High gamma means your position can swing dramatically.
+            
+            **Guidelines for Use:**
+            - **Near-term options (<21 DTE)** -> Very high gamma, risky
+            - **Longer-term options (>60 DTE)** -> Lower gamma, more stable
+            - **At-the-money options** -> Highest gamma
+            
+            **How to use in trading:**
+            - Our framework requires 60+ DTE to keep gamma manageable
+            - Avoid high gamma unless you can monitor constantly
+            """)
+        
+        st.divider()
+        
+        # SECTION 4: PROBABILITY METRICS
+        st.subheader("🎲 Probability Metrics - Understanding Your Odds")
+        
+        with st.expander("📐 Path Touch Probability (P_touch)", expanded=False):
+            st.markdown("""
+            **What it measures:** Probability the stock touches your strike price at least once before expiration.
+            
+            **Why it matters:** Touch probability is usually double Delta. It tells you your chance of hitting profit target early.
+            
+            **Guidelines for Use:**
+            - **P_touch > 60%** -> High chance to hit strike, good for taking profits
+            - **P_touch 40-60%** -> Moderate chance, requires patience
+            - **P_touch < 40%** -> Unlikely to touch, set realistic expectations
+            
+            **How to use in trading:**
+            - Use P_touch to set exit strategy: if P_touch is high, plan to exit at touch
+            - Combine with profit target: If P_touch > 60%, consider taking partial profits at touch
+            """)
+        
+        with st.expander("🎯 Delta Proxy (P_ITM)", expanded=False):
+            st.markdown("""
+            **What it measures:** Estimated probability option expires in-the-money.
+            
+            **Why it matters:** Unlike P_touch (touches any time), P_ITM only counts if you hold to expiration.
+            
+            **How to use in trading:**
+            - Don't hold to expiration unless P_ITM > 70%
+            - Exit when Delta drops below 0.25 (probability has deteriorated)
+            - Our framework's exit is based on time (40% of days left) or profit target, not expiration
+            """)
+        
+        st.divider()
+        
+        # SECTION 5: TECHNICAL INDICATORS
+        st.subheader("📈 Technical Indicators - Timing Your Entry")
+        
+        with st.expander("📊 8/20 EMA Crossover", expanded=False):
+            st.markdown("""
+            **What it measures:** Short-term (8-day) vs medium-term (20-day) moving averages.
+            
+            **Why it matters:** Tells you which time frame has control.
+            
+            **How to use in trading:**
+            - Only buy calls when 8 EMA > 20 EMA
+            - Exit when 8 EMA crosses below 20 EMA (momentum loss)
+            - Look for widening gap between EMAs = strengthening trend
+            """)
+        
+        with st.expander("📊 MACD Histogram", expanded=False):
+            st.markdown("""
+            **What it measures:** Difference between MACD line and signal line. Shows momentum acceleration/deceleration.
+            
+            **Why it matters:** Detects whether buying/selling pressure is increasing.
+            
+            **How to use in trading:**
+            - Prefer trades when histogram is rising
+            - Exit if histogram falls significantly (momentum loss)
+            - Combine with EMA crossover for confirmation
+            """)
+        
+        with st.expander("📊 Bollinger Bands", expanded=False):
+            st.markdown("""
+            **What it measures:** Volatility boundaries (20-day SMA ± 2 standard deviations).
+            
+            **Why it matters:** Shows if price is overextended or has room to run.
+            
+            **How to use in trading:**
+            - Best entries: Price near or below middle band (SMA 20)
+            - Avoid chasing price above upper band (overextended)
+            - Band width: Widening bands = increasing volatility, tightening = decreasing
+            """)
+        
+        st.divider()
+        
+        # SECTION 6: COMPLETE TRADE DECISION FRAMEWORK
+        st.subheader("✅ Complete Trade Decision Framework - Step by Step")
+        st.markdown("""
+        Use this exact checklist before entering ANY trade recommended by the app:
+        
+        **Step 1: Liquidity Filter (MANDATORY)**
+        - [ ] Volume > 50 (preferably > 200)
+        - [ ] Open Interest > 500 (preferably > 1,000)
+        - [ ] Spread < 5% (preferably < 3%)
+        
+        *If any fail: Move to next strike.*
+        
+        **Step 2: Strategy Match**
+        - [ ] Does Delta match your risk profile? (Conservative: 0.50-0.60, Aggressive: 0.40-0.49, Speculative: 0.30-0.39)
+        - [ ] Days to expiry > 60 (our framework requirement)
+        
+        **Step 3: Math Confirmation**
+        - [ ] Composite Score > 55 (for normal position size)
+        - [ ] Expected Value > 0.25 (after accounting for spread)
+        
+        **Step 4: Technical Confirmation**
+        - [ ] 8 EMA > 20 EMA (bullish alignment)
+        - [ ] MACD histogram rising (momentum building)
+        - [ ] Price not above upper Bollinger Band (not overextended)
+        
+        **Step 5: Trade Management Plan**
+        - [ ] Set take profit at 40% of premium price
+        - [ ] Set stop loss at 30% of premium price
+        - [ ] Maximum hold = 40% of days to expiry (or 45 days, whichever smaller)
+        - [ ] Exit date = Calendar date shown in recommendation
+        
+        *If all checks pass: Enter the trade with confidence.*
+        *If 2+ checks fail: Skip the trade, wait for better setup.*
+        """)
+        
+        st.warning("""
+        **⚠️ Remember:** No indicator is perfect. The framework increases your odds but cannot guarantee profits.
+        Always size positions appropriately (never risk more than 1-2% of account per trade) and follow your stop losses.
+        """)
+        
+        st.success("""
+        **💡 Pro Tip:** The best trades happen when ALL four filters pass:
+        1. ✅ Liquidity (Volume + OI + Spread)
+        2. ✅ Math (CTS + EV)
+        3. ✅ Technicals (EMAs + MACD + Bollinger)
+        4. ✅ Management (Pre-set exits)
+        
+        When all four align, the probability of success is maximized.
+        """)
 else:
     st.info("👈 Input a valid trading ticker to trigger the options matrix models.")
