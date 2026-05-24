@@ -2,7 +2,7 @@ import streamlit as st
 import yfinance as yf
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 from scipy.stats import norm
 from google import genai
@@ -28,7 +28,6 @@ def bs_price(S, K, T, r, sigma):
 def calculate_p_touch(S, K, T, sigma):
     """Calculates the probability of touching the strike price before expiration."""
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
-    # Dynamic approximation under risk-neutral assumption (double the probability of expiring ITM)
     d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     p_itm = norm.cdf(d1) if S < K else 1.0 - norm.cdf(d1)
     p_touch = min(p_itm * 2.0, 0.99)
@@ -82,7 +81,7 @@ def get_ai_research(ticker):
         return f"❌ **Search AI Unavailable.** (Detail: {str(e)[:60]}...)"
 
 # --- PAGE CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Analyst Pro Options Suite", layout="wide")
+st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
 
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
@@ -120,18 +119,8 @@ if fetch_btn:
             st.session_state.price = hist['Close'].iloc[-1]
             st.session_state.stock_name = stock_obj.info.get('longName', ticker_input)
             
-            # CRITICAL RULES FILTER: Expiries must be 2+ months out (>= 60 days)
-            today = datetime.now().date()
-            valid_expiries = []
-            for exp in stock_obj.options:
-                days_diff = (pd.to_datetime(exp).date() - today).days
-                if days_diff >= 60:
-                    valid_expiries.append(exp)
-            
-            st.session_state.expiries = valid_expiries
-            
-            if not valid_expiries:
-                st.error("❌ No options found with a 2+ month (>= 60 days) expiry window.")
+            # Change 1: Show all expiry options without filtering them out completely
+            st.session_state.expiries = list(stock_obj.options)
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
@@ -148,31 +137,45 @@ if st.session_state.price and st.session_state.expiries:
     col_p.metric("Current Underlying Price", f"${S:.2f}")
     col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_state.pct_change:.1f}%")
 
-    # Filter selection box to present only valid 2+ month expiries
-    expiry = st.selectbox("Select Filtered Expiry Date (Minimum 60 Days required):", st.session_state.expiries)
+    # Dropdown displaying all available options
+    expiry = st.selectbox("Select Expiry Date:", st.session_state.expiries)
     days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
-    T_years = days_to_expiry / 365
+    T_years = max(days_to_expiry, 1) / 365
 
-    # Fetch and configure Options Table 
+    # Visual dynamic warning if the chosen date violates our rule structure
+    if days_to_expiry < 60:
+        st.warning(f"⚠️ **Rule Warning:** Selected expiry is {days_to_expiry} days away. Framework rules recommend choosing an option $\ge$ 60 days (2+ months) out.")
+
+    # Fetch Call Chain Options 
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     
-    # Precompute structural data elements
+    # Pre-calculate the core technical indicator values for scoring inputs
     tech_score = 0
+    verdict_reasons = []
     if not st.session_state.hist_data.empty:
         df_tech = st.session_state.hist_data.copy()
         curr, prev = get_technicals(df_tech)
-        if curr['ema8'] > curr['ema20']: tech_score += 1
-        if curr['hist'] > prev['hist']: tech_score += 1
-        if S > curr['sma20']: tech_score += 1
+        if curr['ema8'] > curr['ema20']:
+            tech_score += 1
+            verdict_reasons.append("Short-term momentum (8 EMA) is leading the long-term trend.")
+        if curr['hist'] > prev['hist']:
+            tech_score += 1
+            verdict_reasons.append("MACD histogram is rising, indicating selling pressure is exhausting or buying is accelerating.")
+        if S > curr['sma20']:
+            tech_score += 1
+            verdict_reasons.append("Price is holding above the 20-day baseline (Middle Bollinger Band).")
 
     st.divider()
-    t_cons, t_aggr, t_spec, t_tech, t_ai = st.tabs(["🛡️ Conservative Buy", "⚡ Aggressive Buy", "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Grounding"])
+    t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
+        "🛡️ Conservative Buy", "⚡ Aggressive Buy", "🎰 Speculative Buy", 
+        "📊 Technical Analysis", "🤖 AI Grounding", "📖 Strategy Guide"
+    ])
 
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
             tier_contracts = []
             
-            # Loop contract architecture to check mathematically suitable targets
+            # Map structural data loops
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
@@ -181,75 +184,96 @@ if st.session_state.price and st.session_state.expiries:
                 
                 if delta_min <= d <= delta_max:
                     p_touch = calculate_p_touch(S, row['strike'], T_years, row['impliedVolatility'])
-                    
-                    # Expected value equation execution
                     pot_profit = mid * (1 + profit_target_pct / 100)
                     pot_loss = mid * (stop_loss_pct / 100)
                     ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
                     
                     tier_contracts.append({
-                        'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 
+                        'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
                         'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'symbol': row['contractSymbol']
                     })
             
             if not tier_contracts:
-                st.error(f"No contracts on this expiry date match the requested Delta parameters for a {tier_label} strategy.")
+                st.error(f"No contracts available on this expiry option matching {delta_min*100:.0f}%-{delta_max*100:.0f}% Delta.")
                 return
 
             df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
             optimal_contract = df_tier.iloc[0]
             
-            # User choice override selection matrix
+            # Calculate optimal target parameters
+            opt_cts = int(((optimal_contract['delta'] * 0.4) + (optimal_contract['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
+            opt_exit_p = optimal_contract['mid'] * (1 + profit_target_pct / 100)
+            opt_stop_p = optimal_contract['mid'] * (1 - stop_loss_pct / 100)
+            
+            hold_days_limit = min(int(days_to_expiry * 0.4), 45)
+            target_calendar_date = (datetime.now() + timedelta(days=hold_days_limit)).strftime('%B %d, %Y')
+
+            # Change 2 & 3: The Persistent Recommendation Anchor Container
+            st.markdown(f"### 🎯 Core Engine Recommendation ({tier_label} Profile)")
+            
+            box_html = f"""
+            <div style="border: 2px solid #4CAF50; padding: 15px; border-radius: 8px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 20px;">
+                <h4 style="margin-top:0; color:#4CAF50;">System Choice Strike: ${optimal_contract['strike']:.2f} Call</h4>
+                <table style="width:100%; border:none; color:inherit;">
+                    <tr>
+                        <td><b>Composite Score:</b> {opt_cts}/100</td>
+                        <td><b>Entry Limit (Mid):</b> ${optimal_contract['mid']:.2f}</td>
+                        <td><b>Take Profit:</b> ${opt_exit_p:.2f} ({profit_target_pct}%)</td>
+                    </tr>
+                    <tr>
+                        <td><b>Stop Loss Target:</b> ${opt_stop_p:.2f} (-{stop_loss_pct}%)</td>
+                        <td><b>Max Hold Frame:</b> {hold_days_limit} Days</td>
+                        <td><b>Hard Exit Calendar Cutoff:</b> {target_calendar_date}</td>
+                    </tr>
+                </table>
+            </div>
+            """
+            st.markdown(box_html, unsafe_allowed_html=True)
+            
+            st.divider()
+            
+            # Separate Interactive Exploration Filters 
+            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
             strike_list = sorted(df_tier['strike'].tolist())
-            selected_k = st.selectbox(f"Select Available {tier_label} Strike:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
+            selected_k = st.selectbox(f"Select Alternative {tier_label} Strike to Chart:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
             
             chosen = df_tier[df_tier['strike'] == selected_k].iloc[0]
+            chosen_cts = int(((chosen['delta'] * 0.4) + (chosen['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
             
-            # Quantitative Synthesis - Composite Trading Score (CTS) Calculations
-            normalized_ev = 1 if chosen['ev'] > 0 else 0
-            cts_score = int(((chosen['delta'] * 0.4) + (chosen['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
-            
-            # Display metrics columns
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
-                if cts_score >= 55 and chosen['ev'] > 0:
-                    st.success("🎯 RECOMMENDATION: STRONG BUY SETUP")
-                elif cts_score >= 40 and chosen['ev'] > 0:
-                    st.warning("⚖️ RECOMMENDATION: CAUTIOUS / WATCH")
+                if chosen_cts >= 55 and chosen['ev'] > 0:
+                    st.success("✅ HIGH CONVICTION SETUP")
+                elif chosen_cts >= 40 and chosen['ev'] > 0:
+                    st.warning("⚠️ WEAK CONVICTION MATRIX")
                 else:
-                    st.error("🛑 RECOMMENDATION: AVOID / NEGATIVE EXPECTANCY")
+                    st.error("❌ NEGATIVE EXPECTANCY AVOID")
                     
-                st.metric("Composite Trade Score", f"{cts_score}/100")
-                st.metric("Target Entry (Midpoint Price)", f"${chosen['mid']:.2f}")
+                st.metric("Inspected Composite Score", f"{chosen_cts}/100")
+                st.metric("Inspected Entry Target", f"${chosen['mid']:.2f}")
                 
             with c2:
-                target_exit_p = chosen['mid'] * (1 + profit_target_pct / 100)
-                stop_loss_p = chosen['mid'] * (1 - stop_loss_pct / 100)
-                
-                st.metric("Take Profit Target Price", f"${target_exit_p:.2f}")
-                st.metric("Stop Loss Level", f"${stop_loss_p:.2f}")
-                
-                # Calculation metrics for recommended hold timeframe bounds
-                theta_decay_cutoff_days = min(int(days_to_expiry * 0.4), 45)
-                st.write(f"⏱️ **Max Hold Target:** `{theta_decay_cutoff_days} days` *(Exit before accelerated Theta curve)*")
+                st.metric("Inspected Take Profit", f"${chosen['mid'] * (1 + profit_target_pct / 100):.2f}")
+                st.metric("Inspected Stop Loss", f"${chosen['mid'] * (1 - stop_loss_pct / 100):.2f}")
+                st.write(f"⏱️ **Hold Warning:** Exit prior to `{hold_days_limit} days` ({target_calendar_date}) to maintain safe theta exposure.")
 
             with c3:
-                st.write("**Stochastic & Valuation Profiles**")
-                st.write(f"- Stat Probability of Success ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`主力")
-                st.write(f"- Path Probability of Touching Strike: `{chosen['p_touch'] * 100:.1f}%`")
-                st.write(f"- Pure Mathematical Expectancy ($E[X]$ value): `{chosen['ev']:.3f}`")
-                st.write(f"- Implied Volatility (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
+                st.write("**Stochastic Pricing Models**")
+                st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`主力")
+                st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{chosen['p_touch'] * 100:.1f}%`")
+                st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
+                st.write(f"- Daily Theta Drag: `-{abs(chosen['theta']):.3f}` | Vega Sensitive coefficient: `{chosen['vega']}`")
                 
                 h_chart = yf.Ticker(chosen['symbol']).history(period="1mo")
                 if not h_chart.empty: 
-                    st.caption("Contract Price History (1 Month)")
                     st.line_chart(h_chart['Close'])
 
-    # Map the strategy profiles systematically based on your exact mathematical definitions
+    # Map the three explicit strategy tiers based on your parameters
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
     process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
 
+    # Change 4: Restored detailed Technical Analysis Engine
     with t_tech:
         if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
             df_tech = st.session_state.hist_data.copy()
@@ -260,15 +284,33 @@ if st.session_state.price and st.session_state.expiries:
             
             ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
             c1.metric("8/20 EMA Status", ema_status, f"{curr['ema8'] - curr['ema20']:.2f} delta")
+            if curr['ema8'] > curr['ema20'] and prev['ema8'] <= prev['ema20']:
+                c1.success("🔥 JUST CROSSED BULLISH")
             
             macd_dir = "Improving" if curr['hist'] > prev['hist'] else "Fading"
             c2.metric("MACD Momentum", macd_dir, f"{curr['hist']:.3f} hist")
+            if curr['macd'] > 0: c2.caption("Trend Battery: Positive")
             
             pos = "Upper Half" if S > curr['sma20'] else "Lower Half"
             c3.metric("Bollinger Position", pos, f"{((S - curr['lower'])/(curr['upper'] - curr['lower']))*100:.1f}% Band")
+            if S > curr['upper']: c3.warning("⚠️ OVEREXTENDED (Above Upper Band)")
 
             st.divider()
             st.line_chart(df_tech[['Close', 'ema8', 'ema20', 'upper', 'lower']])
+
+            st.subheader("🏁 Final Technical Verdict")
+            if tech_score == 3:
+                st.success("🎯 **VERDICT: INVEST.** All technical indicators are aligned for a bullish continuation.")
+            elif tech_score == 2:
+                st.warning("⚖️ **VERDICT: CAUTION.** Technicals are mixed. Consider a smaller position or wait for confirmation.")
+            else:
+                st.error("🛑 **VERDICT: STAY AWAY.** Momentum is bearish and the price structure is weak.")
+            
+            with st.expander("View Verdict Logic"):
+                for reason in verdict_reasons:
+                    st.write(f"- {reason}")
+                if tech_score < 2:
+                    st.write("- Multiple indicators show declining strength or bearish crossovers.")
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
@@ -284,5 +326,25 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
+    # Change 5: Maintained the full strategy guide 
+    with t_edu:
+        st.subheader("📖 Technical Decoder & Playbook")
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("""
+            #### 📊 Momentum Decoder
+            * **Bullish Cross:** 8 EMA > 20 EMA. Short-term buyers are in control.
+            * **Bearish Separation:** 8 EMA < 20 EMA. The stock is in a downtrend; avoid entering new Call positions.
+            * **MACD Improving:** The histogram is rising (e.g., going from -2.0 to -1.5). This suggests a **reversal** or "buying the dip" opportunity.
+            * **MACD Fading:** Histogram is falling. Buyers are losing steam.
+            """)
+        with col_g2:
+            st.markdown("""
+            #### ⚖️ High-Conviction Checklist
+            - **Trend:** 20-Day SMA Bullish & 8 EMA > 20 EMA.
+            - **MACD:** Look for a green, rising histogram.
+            - **Bollinger:** Best entries occur when price bounces off the Middle Band (SMA 20).
+            - **Risk:** Always set exit alarms for stop-loss or profit booking.
+            """)
 else:
     st.info("👈 Input a valid trading ticker to trigger the options matrix models.")
