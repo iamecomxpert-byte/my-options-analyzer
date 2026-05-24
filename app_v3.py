@@ -532,171 +532,254 @@ if st.session_state.price and st.session_state.expiries:
     # ========================
     # NEW PORTFOLIO TAB
     # ========================
+        # --- PORTFOLIO TAB (UPDATED) ---
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
         
-        # Initialize Google Sheet connection
         if 'sheet_initialized' not in st.session_state:
             init_portfolio_sheet()
             st.session_state.sheet_initialized = True
         
-        # Trader selection (simple dropdown - no authentication)
-        trader_options = ["Trader 1", "Trader 2", "Trader 3", "Admin"]
-        selected_trader = st.selectbox("Select Trader Name:", trader_options, key="trader_select")
+        # --- TRADER MANAGEMENT (Dynamic from Google Sheets) ---
+        def get_trader_list():
+            """Get unique trader names from the portfolio sheet."""
+            worksheet = init_portfolio_sheet()
+            if not worksheet:
+                return ["Trader 1", "Trader 2", "Trader 3"]
+            records = worksheet.get_all_records()
+            traders = set()
+            for record in records:
+                if record.get('trader_name'):
+                    traders.add(record['trader_name'])
+            # Add default if empty
+            if not traders:
+                traders = {"Trader 1", "Trader 2", "Trader 3"}
+            return sorted(list(traders))
         
-        # Display existing positions
+        # Option to add new trader on the fly
+        col_t1, col_t2 = st.columns([3, 1])
+        with col_t1:
+            trader_list = get_trader_list()
+            selected_trader = st.selectbox("Select Trader:", trader_list, key="trader_select")
+        with col_t2:
+            st.write("")
+            st.write("")
+            if st.button("➕ New Trader", key="add_trader_btn"):
+                st.session_state.show_new_trader = True
+        
+        # Show input for new trader name
+        if st.session_state.get('show_new_trader', False):
+            col_n1, col_n2 = st.columns([2, 1])
+            with col_n1:
+                new_trader = st.text_input("Enter new trader name:", key="new_trader_name")
+            with col_n2:
+                st.write("")
+                st.write("")
+                if st.button("Save Trader", key="save_trader"):
+                    if new_trader and new_trader not in trader_list:
+                        st.session_state.new_trader_added = new_trader
+                        st.success(f"Trader '{new_trader}' added! Select from dropdown.")
+                        st.session_state.show_new_trader = False
+                        st.rerun()
+                    else:
+                        st.error("Please enter a valid name")
+        
+        st.divider()
+        
+        # --- DISPLAY ACTIVE POSITIONS ---
         st.subheader("📊 Active Positions")
         positions = get_portfolio_positions(selected_trader if selected_trader != "Admin" else None)
         
-        if positions:
-            # Refresh button
-            if st.button("🔄 Refresh Recommendations", key="refresh_portfolio"):
+        col_r1, col_r2 = st.columns([1, 4])
+        with col_r1:
+            if st.button("🔄 Refresh", key="refresh_portfolio", use_container_width=True):
                 st.rerun()
-            
-            # Display each position
-            for idx, pos in enumerate(positions):
+        
+        if positions:
+            for idx, (row_idx, pos) in enumerate(positions):
                 with st.container():
                     st.markdown(f"---")
                     col1, col2, col3 = st.columns([2, 2, 1])
                     
                     with col1:
-                        st.markdown(f"**{pos['ticker']} {pos['strike']} Call**")
+                        st.markdown(f"**{pos['ticker']} ${float(pos['strike']):.2f} Call**")
                         st.caption(f"Expiry: {pos['expiry']}")
                         st.caption(f"Contracts: {pos['contracts']} @ ${float(pos['entry_price']):.2f}")
+                        st.caption(f"Target: ${float(pos['target_price']):.2f} | Stop: ${float(pos['stop_loss']):.2f}")
                     
                     with col2:
-                        # Get current market data
                         try:
                             stock = yf.Ticker(pos['ticker'])
                             current_price = stock.history(period="1d")['Close'].iloc[-1]
+                            expiry_date = pd.to_datetime(pos['expiry']).date()
+                            days_left = max((expiry_date - datetime.now().date()).days, 0)
                             
-                            # Get current option chain for Greeks
-                            expiry_date = pos['expiry']
-                            strike = float(pos['strike'])
-                            option_chain = stock.option_chain(expiry_date)
-                            option_row = option_chain.calls[option_chain.calls['strike'] == strike]
-                            
-                            if not option_row.empty:
-                                current_iv = option_row['impliedVolatility'].iloc[0]
-                                d, g, t, v = calculate_greeks(
-                                    current_price, strike, 
-                                    max((pd.to_datetime(expiry_date).date() - datetime.now().date()).days, 1) / 365,
-                                    0.05, current_iv
-                                )
-                                current_delta = d
-                            else:
+                            # Get current Greeks
+                            try:
+                                option_chain = stock.option_chain(pos['expiry'])
+                                option_row = option_chain.calls[option_chain.calls['strike'] == float(pos['strike'])]
+                                if not option_row.empty:
+                                    current_iv = option_row['impliedVolatility'].iloc[0]
+                                    d, _, _, _ = calculate_greeks(
+                                        current_price, float(pos['strike']), max(days_left, 1)/365, 0.05, current_iv
+                                    )
+                                    current_delta = d
+                                else:
+                                    current_iv = 0.35
+                                    current_delta = 0.5
+                            except:
+                                current_iv = 0.35
                                 current_delta = 0.5
                             
-                            days_left = max((pd.to_datetime(expiry_date).date() - datetime.now().date()).days, 0)
                             pnl = (current_price - float(pos['entry_price'])) * int(pos['contracts']) * 100
                             pnl_pct = ((current_price - float(pos['entry_price'])) / float(pos['entry_price'])) * 100
                             
                             st.metric("Current Price", f"${current_price:.2f}", 
-                                     delta=f"{pnl_pct:+.1f}% (${pnl:+.0f})")
-                            st.caption(f"Days Left: {days_left} | Delta: {current_delta:.2f}")
+                                     delta=f"{pnl_pct:+.1f}%", 
+                                     delta_color="normal")
                             
-                            # Get recommendation
+                            # Show P&L in dollars
+                            if pnl >= 0:
+                                st.caption(f"💰 P&L: +${pnl:.0f}")
+                            else:
+                                st.caption(f"💰 P&L: -${abs(pnl):.0f}")
+                            
                             recommendation, reason = get_position_recommendation(
                                 pos, current_price, current_iv, current_delta, days_left
                             )
                             
+                            # Color-coded recommendation
+                            if "SELL" in recommendation or "EXIT" in recommendation:
+                                st.error(f"**{recommendation}**")
+                            elif "PROFIT" in recommendation:
+                                st.success(f"**{recommendation}**")
+                            elif "ADD" in recommendation:
+                                st.info(f"**{recommendation}**")
+                            else:
+                                st.info(f"**{recommendation}**")
+                            st.caption(reason)
+                            st.caption(f"Days left: {days_left} | Delta: {current_delta:.2f}")
                         except Exception as e:
-                            st.caption(f"Price unavailable: {str(e)[:50]}")
-                            recommendation = "🔵 HOLD"
-                            reason = "Market data temporarily unavailable"
+                            st.caption(f"⚠️ Data temporarily unavailable")
                         
-                        st.markdown(f"**Recommendation:** {recommendation}")
-                        st.caption(reason)
-                    
                     with col3:
-                        if st.button("Close Position", key=f"close_{idx}"):
-                            close_position(idx)
+                        if st.button("❌ Close", key=f"close_{idx}", use_container_width=True):
+                            close_position(row_idx)
                             st.rerun()
         else:
-            st.info(f"No active positions for {selected_trader}. Add a position below.")
+            st.info(f"No active positions for {selected_trader}")
         
         st.divider()
         
-        # Add new position form
+        # --- ADD NEW POSITION (Auto-populated from sidebar!) ---
         st.subheader("➕ Add New Position")
+        st.caption(f"Auto-filled from sidebar: Ticker = {st.session_state.current_ticker}, Selected Expiry = {expiry}")
         
         with st.form("add_position_form"):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                ticker_pos = st.text_input("Ticker:", "SHOP").upper()
-                strike_pos = st.number_input("Strike Price:", min_value=1.0, step=0.5, format="%.2f")
-                expiry_pos = st.date_input("Expiry Date:", min_value=datetime.now().date())
+                # Auto-populate ticker from sidebar, but allow override
+                ticker_pos = st.text_input(
+                    "Ticker:", 
+                    value=st.session_state.current_ticker if st.session_state.current_ticker else "SHOP",
+                    help="Auto-filled from sidebar. Change if needed."
+                ).upper()
+                
+                strike_pos = st.number_input(
+                    "Strike Price:", 
+                    min_value=1.0, 
+                    step=0.5, 
+                    format="%.2f",
+                    help="The strike price of the option"
+                )
             
             with col2:
-                contracts_pos = st.number_input("Number of Contracts:", min_value=1, step=1)
-                entry_price_pos = st.number_input("Entry Price (per contract):", min_value=0.01, step=0.05, format="%.2f")
+                # Auto-populate expiry from sidebar
+                default_expiry = expiry if 'expiry' in dir() else datetime.now().date() + timedelta(days=60)
+                expiry_pos = st.date_input(
+                    "Expiry Date:", 
+                    value=pd.to_datetime(expiry).date() if 'expiry' in dir() else default_expiry,
+                    min_value=datetime.now().date(),
+                    help="Auto-filled from sidebar. Change if needed."
+                )
+                
+                contracts_pos = st.number_input(
+                    "Number of Contracts:", 
+                    min_value=1, 
+                    step=1,
+                    help="Each contract = 100 shares"
+                )
+            
+            with col3:
+                entry_price_pos = st.number_input(
+                    "Entry Price (per contract):", 
+                    min_value=0.01, 
+                    step=0.05, 
+                    format="%.2f",
+                    help="The price you paid per contract"
+                )
                 
                 # Auto-calculate targets based on current adjusters
                 target_auto = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
                 stop_auto = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
                 
-                st.caption(f"Auto Target: ${target_auto:.2f} (based on {st.session_state.profit_target_pct}% rule)")
-                st.caption(f"Auto Stop: ${stop_auto:.2f} (based on {st.session_state.stop_loss_pct}% rule)")
+                st.info(f"""
+                **Auto-calculated targets:**
+                - Target: ${target_auto:.2f} ({st.session_state.profit_target_pct}% above entry)
+                - Stop: ${stop_auto:.2f} ({st.session_state.stop_loss_pct}% below entry)
+                """)
             
-            with col3:
-                cutoff_auto = min(
-                    expiry_pos - datetime.now().date(),
-                    timedelta(days=45)
-                ).days
-                cutoff_date = datetime.now().date() + timedelta(days=cutoff_auto)
-                st.caption(f"Auto Cutoff: {cutoff_date.strftime('%Y-%m-%d')}")
-                
-                # Get current IV and Delta for entry
-                try:
-                    stock_temp = yf.Ticker(ticker_pos)
-                    current_price_temp = stock_temp.history(period="1d")['Close'].iloc[-1]
-                    option_chain_temp = stock_temp.option_chain(expiry_pos.strftime('%Y-%m-%d'))
-                    option_row_temp = option_chain_temp.calls[option_chain_temp.calls['strike'] == strike_pos]
-                    
-                    if not option_row_temp.empty:
-                        entry_iv = option_row_temp['impliedVolatility'].iloc[0]
-                        days_to_exp = (expiry_pos - datetime.now().date()).days
-                        d_temp, _, _, _ = calculate_greeks(
-                            current_price_temp, strike_pos, max(days_to_exp, 1) / 365, 0.05, entry_iv
-                        )
-                        entry_delta = d_temp
-                        st.caption(f"Entry IV: {entry_iv*100:.1f}% | Delta: {entry_delta:.2f}")
-                    else:
-                        entry_iv = 0.35
-                        entry_delta = 0.50
-                except:
+            # Hidden auto-calculations
+            cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
+            cutoff_date = datetime.now().date() + timedelta(days=max(cutoff_days, 1))
+            
+            # Estimate IV and Delta (will be updated when position is saved)
+            try:
+                stock_temp = yf.Ticker(ticker_pos)
+                current_price_temp = stock_temp.history(period="1d")['Close'].iloc[-1]
+                option_chain_temp = stock_temp.option_chain(expiry_pos.strftime('%Y-%m-%d'))
+                option_row_temp = option_chain_temp.calls[option_chain_temp.calls['strike'] == strike_pos]
+                if not option_row_temp.empty:
+                    entry_iv = option_row_temp['impliedVolatility'].iloc[0]
+                    days_to_exp = (expiry_pos - datetime.now().date()).days
+                    d_temp, _, _, _ = calculate_greeks(
+                        current_price_temp, strike_pos, max(days_to_exp, 1) / 365, 0.05, entry_iv
+                    )
+                    entry_delta = d_temp
+                else:
                     entry_iv = 0.35
                     entry_delta = 0.50
+            except:
+                entry_iv = 0.35
+                entry_delta = 0.50
             
-            submitted = st.form_submit_button("💾 Save Position")
+            submitted = st.form_submit_button("💾 Save Position", use_container_width=True, type="primary")
             
             if submitted:
-                # Calculate values
-                target_price = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
-                stop_loss = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
-                cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
-                
-                # Add to Google Sheets
-                success = add_position_to_sheet(
-                    trader_name=selected_trader,
-                    ticker=ticker_pos,
-                    strike=strike_pos,
-                    expiry=expiry_pos.strftime('%Y-%m-%d'),
-                    contracts=contracts_pos,
-                    entry_price=entry_price_pos,
-                    entry_iv=entry_iv,
-                    entry_delta=entry_delta,
-                    target_price=target_price,
-                    stop_loss=stop_loss,
-                    cutoff_date=cutoff_date_str
-                )
-                
-                if success:
-                    st.success(f"Position added for {selected_trader}! {ticker_pos} ${strike_pos:.2f} Call")
-                    st.rerun()
+                if strike_pos <= 0 or entry_price_pos <= 0:
+                    st.error("Please enter valid strike price and entry price")
                 else:
-                    st.error("Failed to save position. Check Google Sheets connection.")
+                    success = add_position_to_sheet(
+                        trader_name=selected_trader,
+                        ticker=ticker_pos,
+                        strike=strike_pos,
+                        expiry=expiry_pos.strftime('%Y-%m-%d'),
+                        contracts=contracts_pos,
+                        entry_price=entry_price_pos,
+                        entry_iv=entry_iv,
+                        entry_delta=entry_delta,
+                        target_price=target_auto,
+                        stop_loss=stop_auto,
+                        cutoff_date=cutoff_date.strftime('%Y-%m-%d')
+                    )
+                    if success:
+                        st.success(f"✅ Position added for {selected_trader}!")
+                        st.balloons()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to save. Check Google Sheets connection.")
     
     with t_edu:
         st.header("📖 Strategy Guide")
