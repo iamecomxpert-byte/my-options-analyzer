@@ -128,7 +128,6 @@ if fetch_btn:
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
             st.session_state.pct_change = ((st.session_state.price / hist['Close'].iloc[-20]) - 1) * 100
             
-            # FIXED: Calculate technicals first before using 'curr' and 'prev' variables
             df_tech_init = hist.copy()
             curr_init, prev_init = get_technicals(df_tech_init)
             
@@ -186,7 +185,7 @@ if st.session_state.price and st.session_state.expiries:
     
     col_p, col_t = st.columns(2)
     col_p.metric("Current Underlying Price", f"${S:.2f}")
-    col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_change:.1f}%" if 'session_change' in locals() else f"{st.session_state.pct_change:.1f}%")
+    col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_state.pct_change:.1f}%")
 
     st.divider()
     
@@ -262,7 +261,7 @@ if st.session_state.price and st.session_state.expiries:
             tech_score += 1
             verdict_reasons.append("Price is holding above the 20-day baseline (Middle Bollinger Band).")
 
-    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label, session_global_key):
+    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
             tier_contracts = []
             
@@ -277,52 +276,50 @@ if st.session_state.price and st.session_state.expiries:
                     pot_profit = mid * (1 + profit_target_pct / 100)
                     pot_loss = mid * (stop_loss_pct / 100)
                     ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
+                    cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
                     
                     tier_contracts.append({
                         'strike': row['strike'], 'mid': mid, 'delta': d, 'theta': t, 'gamma': g, 'vega': v,
-                        'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'symbol': row['contractSymbol']
+                        'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'cts': cts, 'symbol': row['contractSymbol']
                     })
             
-            st.markdown(f"### 🎯 Static Global Recommendation Summary Target ({tier_label})")
-            g_prof = st.session_state.get(session_global_key)
-            if g_prof:
-                g_exit = g_prof['mid'] * (1 + profit_target_pct / 100)
-                g_stop = g_prof['mid'] * (1 - stop_loss_pct / 100)
-                g_hold = min(int(g_prof['days'] * 0.4), 45)
-                g_date = (datetime.now() + timedelta(days=g_hold)).strftime('%B %d, %Y')
-                
-                box_html = f"""
-                <div style="border: 2px solid #4CAF50; padding: 15px; border-radius: 8px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
-                    <h4 style="margin-top:0; color:#4CAF50;">System Absolute Recommendation: {g_prof['expiry']} Expiry | ${g_prof['strike']:.2f} Call</h4>
-                    <p style="margin:4px 0;">This choice stays locked regardless of manual filters adjusted below.</p>
-                    <table style="width:100%; border:none; color:inherit; margin-top:10px;">
-                        <tr>
-                            <td><b>Composite Score:</b> {g_prof['cts']}/100</td>
-                            <td><b>Entry Mid Price:</b> ${g_prof['mid']:.2f}</td>
-                            <td><b>Take Profit target:</b> ${g_exit:.2f}</td>
-                        </tr>
-                        <tr>
-                            <td><b>Stop Loss Point:</b> ${g_stop:.2f}</td>
-                            <td><b>Max Hold Limit:</b> {g_hold} Days</td>
-                            <td><b>Calendar Cutoff Date:</b> {g_date}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-                st.markdown(box_html, unsafe_allow_html=True)
-            else:
-                st.info("No global optimal strike identified for this category in background runs.")
-
-            st.divider()
-            
-            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
             if not tier_contracts:
                 st.error(f"No contracts available on this specific selected expiry date ({expiry}) matching the Delta bounds.")
                 return
 
             df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
-            optimal_contract = df_tier.iloc[0]
             
+            # Change 2: Recommendation changes dynamically based on the sidebar's expiration date choice
+            optimal_contract = df_tier.iloc[0]
+            opt_exit = optimal_contract['mid'] * (1 + profit_target_pct / 100)
+            opt_stop = optimal_contract['mid'] * (1 - stop_loss_pct / 100)
+            opt_hold = min(int(days_to_expiry * 0.4), 45)
+            opt_date = (datetime.now() + timedelta(days=opt_hold)).strftime('%B %d, %Y')
+            
+            st.markdown(f"### 🎯 Optimal Selection for {expiry} Expiry ({tier_label})")
+            box_html = f"""
+            <div style="border: 2px solid #2196F3; padding: 15px; border-radius: 8px; background-color: rgba(33, 150, 243, 0.1); margin-bottom: 25px;">
+                <h4 style="margin-top:0; color:#2196F3;">Best Choice for Selected Expiry: ${optimal_contract['strike']:.2f} Call</h4>
+                <p style="margin:4px 0;">Calculated optimal target parameters for this expiration tier:</p>
+                <table style="width:100%; border:none; color:inherit; margin-top:10px;">
+                    <tr>
+                        <td><b>Composite Score:</b> {optimal_contract['cts']}/100</td>
+                        <td><b>Entry Mid Price:</b> ${optimal_contract['mid']:.2f}</td>
+                        <td><b>Take Profit Target:</b> ${opt_exit:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Stop Loss Point:</b> ${opt_stop:.2f}</td>
+                        <td><b>Max Hold Limit:</b> {opt_hold} Days</td>
+                        <td><b>Calendar Cutoff Date:</b> {opt_date}</td>
+                    </tr>
+                </table>
+            </div>
+            """
+            st.markdown(box_html, unsafe_allow_html=True)
+
+            st.divider()
+            
+            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
             strike_list = sorted(df_tier['strike'].tolist())
             selected_k = st.selectbox(f"Select Alternative {tier_label} Strike to Investigate:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
             
@@ -352,14 +349,26 @@ if st.session_state.price and st.session_state.expiries:
                 st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
                 st.write(f"- Volatility Index (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
                 
+                # Change 3: Short, simple English definitions container
+                st.markdown("""
+                <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
+                <b>📈 What these numbers mean in plain English:</b><br>
+                • <b>Delta Proxy:</b> The estimated mathematical chance this contract finishes completely inside the money at expiration.<br>
+                • <b>Path Touch Probability:</b> The likelihood that the stock price flashes or touches this strike at least <i>once</i> before expiry (giving you a chance to exit early). This is usually double the Delta value.<br>
+                • <b>Expected Valuation ($E[X]$):</b> The net profit expectancy. A positive value means the risk-to-reward math favors long setups over time.<br>
+                • <b>Daily Theta:</b> The amount of premium value this option drops every single day just from time moving forward. Higher IV speeds up this decay.
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.write("")
                 h_chart = yf.Ticker(chosen['symbol']).history(period="1mo")
                 if not h_chart.empty: 
                     st.line_chart(h_chart['Close'])
 
     # Map strategies into isolated tiers 
-    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative", "global_conservative")
-    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", "global_aggressive")
-    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", "global_speculative")
+    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
+    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
+    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
 
     # Technical Analysis Verdict Core block
     with t_tech:
