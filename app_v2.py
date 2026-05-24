@@ -86,7 +86,8 @@ st.set_page_config(page_title="Analyst Pro Options Suite v2", layout="wide")
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
-    'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame()
+    'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
+    'global_conservative': None, 'global_aggressive': None, 'global_speculative': None
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -102,10 +103,13 @@ with st.sidebar:
     profit_target_pct = st.slider("Target Option Profit Booking (%)", 10, 150, 40, step=5)
     stop_loss_pct = st.slider("Max Stop Loss (%)", 10, 100, 30, step=5)
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING & GLOBAL SCANS ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
     st.session_state.ai_brief = "" 
+    st.session_state.global_conservative = None
+    st.session_state.global_aggressive = None
+    st.session_state.global_speculative = None
     
     try:
         stock_obj = yf.Ticker(ticker_input)
@@ -118,17 +122,62 @@ if fetch_btn:
             st.session_state.hist_data = hist
             st.session_state.price = hist['Close'].iloc[-1]
             st.session_state.stock_name = stock_obj.info.get('longName', ticker_input)
-            
-            # Change 1: Show all expiry options without filtering them out completely
             st.session_state.expiries = list(stock_obj.options)
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
             st.session_state.pct_change = ((st.session_state.price / hist['Close'].iloc[-20]) - 1) * 100
+            
+            # Pre-calculate base tech metrics for scoring indicators
+            tech_score = 0
+            if curr['ema8'] > curr['ema20']: tech_score += 1
+            if curr['hist'] > prev['hist']: tech_score += 1
+            if st.session_state.price > sma20_val: tech_score += 1
+
+            # NEW LOGIC: Multi-expiration background scanner for the Summary Tab
+            today = datetime.now().date()
+            valid_global_expiries = [exp for exp in stock_obj.options if (pd.to_datetime(exp).date() - today).days >= 60]
+            
+            cons_candidates = []
+            aggr_candidates = []
+            spec_candidates = []
+            
+            # Scans up to the first 6 valid future dates to avoid API timeouts
+            with st.spinner("Processing mathematical matrix across options chain..."):
+                for exp_date in valid_global_expiries[:6]:
+                    try:
+                        opt_chain = stock_obj.option_chain(exp_date).calls
+                        days_exp = (pd.to_datetime(exp_date).date() - today).days
+                        t_yrs = days_exp / 365
+                        
+                        for _, row in opt_chain.iterrows():
+                            mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                            if mid_p <= 0 or row['impliedVolatility'] <= 0: continue
+                            
+                            d, g, t, v = calculate_greeks(st.session_state.price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
+                            p_t = calculate_p_touch(st.session_state.price, row['strike'], t_yrs, row['impliedVolatility'])
+                            ev_val = (p_t * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_t) * (mid_p * (stop_loss_pct / 100)))
+                            cts = int(((d * 0.4) + (p_t * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
+                            
+                            c_data = {
+                                'strike': row['strike'], 'expiry': exp_date, 'mid': mid_p, 'delta': d, 
+                                'p_touch': p_t, 'ev': ev_val, 'cts': cts, 'days': days_exp, 'iv': row['impliedVolatility']
+                            }
+                            
+                            if 0.50 <= d <= 0.60: cons_candidates.append(c_data)
+                            elif 0.40 <= d <= 0.49: aggr_candidates.append(c_data)
+                            elif 0.30 <= d <= 0.39: spec_candidates.append(c_data)
+                    except:
+                        continue
+            
+            if cons_candidates: st.session_state.global_conservative = max(cons_candidates, key=lambda x: x['ev'])
+            if aggr_candidates: st.session_state.global_aggressive = max(aggr_candidates, key=lambda x: x['ev'])
+            if spec_candidates: st.session_state.global_speculative = max(spec_candidates, key=lambda x: x['ev'])
+
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
 
-# --- MAIN DASHBOARD ---
+# --- MAIN DASHBOARD VIEW ---
 if st.session_state.price and st.session_state.expiries:
     S = st.session_state.price
     st.header(f"{st.session_state.stock_name} ({st.session_state.current_ticker})")
@@ -137,19 +186,65 @@ if st.session_state.price and st.session_state.expiries:
     col_p.metric("Current Underlying Price", f"${S:.2f}")
     col_t.metric("20-Day Baseline Trend", st.session_state.trend, f"{st.session_state.pct_change:.1f}%")
 
-    # Dropdown displaying all available options
-    expiry = st.selectbox("Select Expiry Date:", st.session_state.expiries)
+    st.divider()
+    
+    # Restructured View Tabs Container
+    t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
+        "📋 Global Recommendations", "🛡️ Conservative Buy", "⚡ Aggressive Buy", 
+        "🎰 Speculative Buy", "📊 Technical Analysis", "🤖 AI Grounding", "📖 Strategy Guide"
+    ])
+
+    # NEW ACTION 1: Permanent Summary Tab Rendering Engine
+    with t_summary:
+        st.subheader("🏁 Automated Quantitative Trading Dashboard")
+        st.markdown("This panel displays the mathematically optimal contract selection across the *entire chain life* matching our risk filters ($\ge$ 60 Days Expiry).")
+        
+        sum_data = []
+        profiles = [
+            ("🛡️ Conservative Buy", st.session_state.global_conservative, "50-60%"),
+            ("⚡ Aggressive Buy", st.session_state.global_aggressive, "40-49%"),
+            ("🎰 Speculative Buy", st.session_state.global_speculative, "30-39%")
+        ]
+        
+        for name, profile, target_d in profiles:
+            if profile:
+                t_exit = profile['mid'] * (1 + profit_target_pct / 100)
+                s_loss = profile['mid'] * (1 - stop_loss_pct / 100)
+                h_days = min(int(profile['days'] * 0.4), 45)
+                h_date = (datetime.now() + timedelta(days=h_days)).strftime('%b %d, %Y')
+                
+                sum_data.append({
+                    "Strategy Profile": name,
+                    "Target Delta": target_d,
+                    "Optimal Strike": f"${profile['strike']:.2f} Call",
+                    "Best Expiry Date": profile['expiry'],
+                    "Entry Target (Mid)": f"${profile['mid']:.2f}",
+                    "Take Profit Target": f"${t_exit:.2f}",
+                    "Stop Loss Target": f"${s_loss:.2f}",
+                    "Max Hold Time": f"{h_days} Days ({h_date})",
+                    "Composite Score": f"{profile['cts']}/100"
+                })
+        
+        if sum_data:
+            df_summary_table = pd.DataFrame(sum_data)
+            st.table(df_summary_table.set_index("Strategy Profile"))
+        else:
+            st.warning("No contracts met the strict mathematical baseline definitions across the processed options chain.")
+
+    # Shared Dropdown Matrix for Individual Workspace Tabs
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Workspace Adjuster")
+    expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
     days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
     T_years = max(days_to_expiry, 1) / 365
 
-    # Visual dynamic warning if the chosen date violates our rule structure
     if days_to_expiry < 60:
-        st.warning(f"⚠️ **Rule Warning:** Selected expiry is {days_to_expiry} days away. Framework rules recommend choosing an option $\ge$ 60 days (2+ months) out.")
+        st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework recommendation rule.")
 
-    # Fetch Call Chain Options 
+    # Fetch Call Chain Options table for specific selections
     chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
     
-    # Pre-calculate the core technical indicator values for scoring inputs
+    # Standard tech metric arrays for the workspace calculations
     tech_score = 0
     verdict_reasons = []
     if not st.session_state.hist_data.empty:
@@ -165,17 +260,10 @@ if st.session_state.price and st.session_state.expiries:
             tech_score += 1
             verdict_reasons.append("Price is holding above the 20-day baseline (Middle Bollinger Band).")
 
-    st.divider()
-    t_cons, t_aggr, t_spec, t_tech, t_ai, t_edu = st.tabs([
-        "🛡️ Conservative Buy", "⚡ Aggressive Buy", "🎰 Speculative Buy", 
-        "📊 Technical Analysis", "🤖 AI Grounding", "📖 Strategy Guide"
-    ])
-
-    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
+    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label, session_global_key):
         with tab_component:
             tier_contracts = []
             
-            # Map structural data loops
             for index, row in chain.iterrows():
                 mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
                 if mid <= 0 or row['impliedVolatility'] <= 0: continue
@@ -193,87 +281,86 @@ if st.session_state.price and st.session_state.expiries:
                         'iv': row['impliedVolatility'], 'p_touch': p_touch, 'ev': ev, 'symbol': row['contractSymbol']
                     })
             
+            st.markdown(f"### 🎯 Static Global Recommendation Summary Target ({tier_label})")
+            g_prof = st.session_state.get(session_global_key)
+            if g_prof:
+                g_exit = g_prof['mid'] * (1 + profit_target_pct / 100)
+                g_stop = g_prof['mid'] * (1 - stop_loss_pct / 100)
+                g_hold = min(int(g_prof['days'] * 0.4), 45)
+                g_date = (datetime.now() + timedelta(days=g_hold)).strftime('%B %d, %Y')
+                
+                # Fixed Action 4: Changed unsafe_allowed_html to unsafe_allow_html
+                box_html = f"""
+                <div style="border: 2px solid #4CAF50; padding: 15px; border-radius: 8px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
+                    <h4 style="margin-top:0; color:#4CAF50;">System Absolute Recommendation: {g_prof['expiry']} Expiry | ${g_prof['strike']:.2f} Call</h4>
+                    <p style="margin:4px 0;">This choice stays locked regardless of manual filters adjusted below.</p>
+                    <table style="width:100%; border:none; color:inherit; margin-top:10px;">
+                        <tr>
+                            <td><b>Composite Score:</b> {g_prof['cts']}/100</td>
+                            <td><b>Entry Mid Price:</b> ${g_prof['mid']:.2f}</td>
+                            <td><b>Take Profit target:</b> ${g_exit:.2f}</td>
+                        </tr>
+                        <tr>
+                            <td><b>Stop Loss Point:</b> ${g_stop:.2f}</td>
+                            <td><b>Max Hold Limit:</b> {g_hold} Days</td>
+                            <td><b>Calendar Cutoff Date:</b> {g_date}</td>
+                        </tr>
+                    </table>
+                </div>
+                """
+                st.markdown(box_html, unsafe_allow_html=True)
+            else:
+                st.info("No global optimal strike identified for this category in background runs.")
+
+            st.divider()
+            
+            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
             if not tier_contracts:
-                st.error(f"No contracts available on this expiry option matching {delta_min*100:.0f}%-{delta_max*100:.0f}% Delta.")
+                st.error(f"No contracts available on this specific selected expiry date ({expiry}) matching the Delta bounds.")
                 return
 
             df_tier = pd.DataFrame(tier_contracts).sort_values(by='ev', ascending=False)
             optimal_contract = df_tier.iloc[0]
             
-            # Calculate optimal target parameters
-            opt_cts = int(((optimal_contract['delta'] * 0.4) + (optimal_contract['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
-            opt_exit_p = optimal_contract['mid'] * (1 + profit_target_pct / 100)
-            opt_stop_p = optimal_contract['mid'] * (1 - stop_loss_pct / 100)
-            
-            hold_days_limit = min(int(days_to_expiry * 0.4), 45)
-            target_calendar_date = (datetime.now() + timedelta(days=hold_days_limit)).strftime('%B %d, %Y')
-
-            # Change 2 & 3: The Persistent Recommendation Anchor Container
-            st.markdown(f"### 🎯 Core Engine Recommendation ({tier_label} Profile)")
-            
-            box_html = f"""
-            <div style="border: 2px solid #4CAF50; padding: 15px; border-radius: 8px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 20px;">
-                <h4 style="margin-top:0; color:#4CAF50;">System Choice Strike: ${optimal_contract['strike']:.2f} Call</h4>
-                <table style="width:100%; border:none; color:inherit;">
-                    <tr>
-                        <td><b>Composite Score:</b> {opt_cts}/100</td>
-                        <td><b>Entry Limit (Mid):</b> ${optimal_contract['mid']:.2f}</td>
-                        <td><b>Take Profit:</b> ${opt_exit_p:.2f} ({profit_target_pct}%)</td>
-                    </tr>
-                    <tr>
-                        <td><b>Stop Loss Target:</b> ${opt_stop_p:.2f} (-{stop_loss_pct}%)</td>
-                        <td><b>Max Hold Frame:</b> {hold_days_limit} Days</td>
-                        <td><b>Hard Exit Calendar Cutoff:</b> {target_calendar_date}</td>
-                    </tr>
-                </table>
-            </div>
-            """
-            st.markdown(box_html, unsafe_allow_html=True)
-            
-            st.divider()
-            
-            # Separate Interactive Exploration Filters 
-            st.markdown("### 🔍 Manual Strike Inspection Sandbox")
             strike_list = sorted(df_tier['strike'].tolist())
-            selected_k = st.selectbox(f"Select Alternative {tier_label} Strike to Chart:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
+            selected_k = st.selectbox(f"Select Alternative {tier_label} Strike to Investigate:", strike_list, index=strike_list.index(optimal_contract['strike']), key=f"sel_{tier_label}_{expiry}")
             
             chosen = df_tier[df_tier['strike'] == selected_k].iloc[0]
             chosen_cts = int(((chosen['delta'] * 0.4) + (chosen['p_touch'] * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
             
             c1, c2, c3 = st.columns([1.5, 1.5, 2])
             with c1:
-                if chosen_cts >= 55 and chosen['ev'] > 0:
-                    st.success("✅ HIGH CONVICTION SETUP")
-                elif chosen_cts >= 40 and chosen['ev'] > 0:
-                    st.warning("⚠️ WEAK CONVICTION MATRIX")
-                else:
-                    st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                if chosen_cts >= 55 and chosen['ev'] > 0: st.success("✅ STRUCTURAL BUY INSTANCE")
+                elif chosen_cts >= 40 and chosen['ev'] > 0: st.warning("⚠️ WEAK EDGE PATTERN")
+                else: st.error("❌ NEGATIVE EXPECTANCY AVOID")
                     
-                st.metric("Inspected Composite Score", f"{chosen_cts}/100")
+                st.metric("Inspected Score Metric", f"{chosen_cts}/100")
                 st.metric("Inspected Entry Target", f"${chosen['mid']:.2f}")
                 
             with c2:
                 st.metric("Inspected Take Profit", f"${chosen['mid'] * (1 + profit_target_pct / 100):.2f}")
                 st.metric("Inspected Stop Loss", f"${chosen['mid'] * (1 - stop_loss_pct / 100):.2f}")
-                st.write(f"⏱️ **Hold Warning:** Exit prior to `{hold_days_limit} days` ({target_calendar_date}) to maintain safe theta exposure.")
+                h_days_lim = min(int(days_to_expiry * 0.4), 45)
+                h_date_lim = (datetime.now() + timedelta(days=h_days_lim)).strftime('%B %d, %Y')
+                st.write(f"⏱️ **Hold Cutoff:** `{h_days_lim} days` ({h_date_lim})")
 
             with c3:
-                st.write("**Stochastic Pricing Models**")
+                st.write("**Stochastic Engine Outputs**")
                 st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{chosen['delta'] * 100:.1f}%`主力")
                 st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{chosen['p_touch'] * 100:.1f}%`")
                 st.write(f"- Expected Valuation Return Matrix ($E[X]$): `{chosen['ev']:.3f}`")
-                st.write(f"- Daily Theta Drag: `-{abs(chosen['theta']):.3f}` | Vega Sensitive coefficient: `{chosen['vega']}`")
+                st.write(f"- Volatility Index (IV): `{chosen['iv']*100:.1f}%` | Daily Theta: `-{abs(chosen['theta']):.3f}`")
                 
                 h_chart = yf.Ticker(chosen['symbol']).history(period="1mo")
                 if not h_chart.empty: 
                     st.line_chart(h_chart['Close'])
 
-    # Map the three explicit strategy tiers based on your parameters
-    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
-    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
-    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
+    # Map strategies into isolated tiers 
+    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative", "global_conservative")
+    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", "global_aggressive")
+    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", "global_speculative")
 
-    # Change 4: Restored detailed Technical Analysis Engine
+    # Technical Analysis Verdict Core block
     with t_tech:
         if not st.session_state.hist_data.empty and 'Close' in st.session_state.hist_data.columns:
             df_tech = st.session_state.hist_data.copy()
@@ -289,7 +376,6 @@ if st.session_state.price and st.session_state.expiries:
             
             macd_dir = "Improving" if curr['hist'] > prev['hist'] else "Fading"
             c2.metric("MACD Momentum", macd_dir, f"{curr['hist']:.3f} hist")
-            if curr['macd'] > 0: c2.caption("Trend Battery: Positive")
             
             pos = "Upper Half" if S > curr['sma20'] else "Lower Half"
             c3.metric("Bollinger Position", pos, f"{((S - curr['lower'])/(curr['upper'] - curr['lower']))*100:.1f}% Band")
@@ -326,7 +412,6 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
-    # Change 5: Maintained the full strategy guide 
     with t_edu:
         st.subheader("📖 Technical Decoder & Playbook")
         col_g1, col_g2 = st.columns(2)
