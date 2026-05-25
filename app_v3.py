@@ -733,6 +733,43 @@ if st.session_state.price and st.session_state.expiries:
             cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
             return cts, ev, d, p_touch
         
+        # Helper function to add trader with email
+        def add_trader_to_sheet(trader_name, email):
+            """Add a new trader with email to the Traders sheet."""
+            sheet = get_google_sheet()
+            if not sheet:
+                return False
+            try:
+                traders_worksheet = sheet.worksheet("Traders")
+            except:
+                traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
+                traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
+            
+            # Check if trader already exists
+            existing = traders_worksheet.findall(trader_name)
+            if existing:
+                return False
+            
+            traders_worksheet.append_row([
+                trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ])
+            return True
+        
+        def get_trader_email(trader_name):
+            """Get email for a trader from Traders sheet."""
+            sheet = get_google_sheet()
+            if not sheet:
+                return None
+            try:
+                traders_worksheet = sheet.worksheet("Traders")
+                records = traders_worksheet.get_all_records()
+                for record in records:
+                    if record.get('trader_name') == trader_name:
+                        return record.get('email')
+                return None
+            except:
+                return None
+        
         # Trader selection
         trader_options = get_trader_list()
         selected_trader = st.selectbox("Select Trader:", trader_options, key="trader_select")
@@ -743,25 +780,37 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.show_new_trader = True
         
         if st.session_state.get('show_new_trader', False):
-            col_n1, col_n2, col_n3 = st.columns([2, 1, 1])
+            col_n1, col_n2, col_n3, col_n4 = st.columns([2, 2, 1, 1])
             with col_n1:
-                new_trader_name = st.text_input("New trader name:", key="new_trader_input")
+                new_trader_name = st.text_input("Trader name:", key="new_trader_input")
             with col_n2:
+                new_trader_email = st.text_input("Email address:", key="new_trader_email", 
+                                                  placeholder="trader@example.com")
+            with col_n3:
                 if st.button("Save", key="save_new_trader"):
                     if new_trader_name and new_trader_name not in trader_options:
-                        dummy_worksheet = init_portfolio_sheet()
-                        if dummy_worksheet:
-                            dummy_worksheet.append_row([
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                                new_trader_name, "PLACEHOLDER", 0, "2024-01-01", 
-                                0, 0, 0, 0, "2024-01-01", 0, 0, "inactive", "", ""
-                            ])
-                            st.success(f"Trader '{new_trader_name}' added!")
-                            st.session_state.show_new_trader = False
-                            st.rerun()
+                        if new_trader_email and "@" in new_trader_email:
+                            # Add to Traders sheet
+                            success = add_trader_to_sheet(new_trader_name, new_trader_email)
+                            if success:
+                                # Add placeholder position to Portfolio sheet
+                                dummy_worksheet = init_portfolio_sheet()
+                                if dummy_worksheet:
+                                    dummy_worksheet.append_row([
+                                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                                        new_trader_name, "PLACEHOLDER", 0, "2024-01-01", 
+                                        0, 0, 0, 0, "2024-01-01", 0, 0, "inactive", "", ""
+                                    ])
+                                    st.success(f"Trader '{new_trader_name}' added with email {new_trader_email}!")
+                                    st.session_state.show_new_trader = False
+                                    st.rerun()
+                            else:
+                                st.error("Trader already exists")
+                        else:
+                            st.error("Please enter a valid email address")
                     else:
-                        st.error("Please enter a valid name")
-            with col_n3:
+                        st.error("Please enter a valid trader name")
+            with col_n4:
                 if st.button("Cancel", key="cancel_new_trader"):
                     st.session_state.show_new_trader = False
                     st.rerun()
@@ -973,7 +1022,16 @@ if st.session_state.price and st.session_state.expiries:
                     st.caption(f"⭐ Recommended strike - Mid: ${selected_mid:.2f}")
                 elif cons_strike:
                     st.caption(f"💡 Conservative recommendation: ${cons_strike:.2f} (Mid: ${cons_mid:.2f})")
+
+                                # Show email reminder if trader has no email
+                trader_email = get_trader_email(selected_trader)
+                if not trader_email:
+                    st.warning(f"⚠️ No email configured for {selected_trader}. Add email when creating trader to receive alerts.")
+                else:
+                    st.caption(f"📧 Alerts will be sent to: {trader_email}")
                 
+                st.divider()
+              
                 with st.form("add_position_form"):
                     col1, col2, col3 = st.columns(3)
                     with col1:
