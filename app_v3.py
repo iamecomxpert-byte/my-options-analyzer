@@ -368,7 +368,7 @@ if fetch_btn:
             st.session_state.hist_data = hist
             st.session_state.price = hist['Close'].iloc[-1]
             st.session_name = stock_obj.info.get('longName', ticker_input)
-            st.session_state.stock_name = st_session_name
+            st.session_state.stock_name = st.session_name
             st.session_state.expiries = list(stock_obj.options)
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
@@ -576,7 +576,7 @@ if st.session_state.price and st.session_state.expiries:
                     <tr>
                         <td><b>Composite Score:</b></td>
                         <td>{best_contract['cts']}/100</td>
-                        <td><b>Entry:</b></td>
+                        <tr><b>Entry:</b></td>
                         <td>${best_contract['mid']:.2f}</td>
                     </tr>
                     <tr>
