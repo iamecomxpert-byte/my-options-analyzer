@@ -114,6 +114,44 @@ def get_trader_list():
         return ["Mukul"]
     return sorted(list(traders))
 
+# ========== NEW: AUTOMATION FUNCTIONS (Added to v3) ==========
+def add_trader_to_sheet(trader_name, email):
+    """Add a new trader with email to the Traders sheet."""
+    sheet = get_google_sheet()
+    if not sheet:
+        return False
+    try:
+        traders_worksheet = sheet.worksheet("Traders")
+    except:
+        traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
+        traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
+    
+    # Check if trader already exists
+    existing = traders_worksheet.findall(trader_name)
+    if existing:
+        return False
+    
+    traders_worksheet.append_row([
+        trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ])
+    return True
+
+def get_trader_email(trader_name):
+    """Get email for a trader from Traders sheet."""
+    sheet = get_google_sheet()
+    if not sheet:
+        return None
+    try:
+        traders_worksheet = sheet.worksheet("Traders")
+        records = traders_worksheet.get_all_records()
+        for record in records:
+            if record.get('trader_name') == trader_name:
+                return record.get('email')
+        return None
+    except:
+        return None
+# ========== END OF NEW FUNCTIONS ==========
+
 # --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
     for attempt in range(max_retries):
@@ -589,14 +627,30 @@ if st.session_state.price and st.session_state.expiries:
             <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1);">
                 <h4 style="margin-top:0;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
                 <table style="width:100%;">
-                    <tr><td><b>Composite Score:</b></td><td>{best_contract['cts']}/100</td>
-                        <td><b>Entry:</b></td><td>${best_contract['mid']:.2f}</td></tr>
-                    <tr><td><b>Target:</b></td><td>${reco_exit:.2f}</td>
-                        <td><b>Stop:</b></td><td>${reco_stop:.2f}</td></tr>
-                    <tr><td><b>Hold Limit:</b></td><td>{reco_hold} Days</td>
-                        <td><b>Cutoff:</b></td><td>{reco_date}</td></tr>
-                    <tr><td><b>Volume:</b></td><td>{best_contract['volume']:,}</td>
-                        <td><b>OI:</b></td><td>{best_contract['open_interest']:,}</td></tr>
+                    <tr>
+                        <td><b>Composite Score:</b></td>
+                        <td>{best_contract['cts']}/100</td>
+                        <td><b>Entry:</b></td>
+                        <td>${best_contract['mid']:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Target:</b></td>
+                        <td>${reco_exit:.2f}</td>
+                        <td><b>Stop:</b></td>
+                        <td>${reco_stop:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Hold Limit:</b></td>
+                        <td>{reco_hold} Days</td>
+                        <td><b>Cutoff:</b></td>
+                        <td>{reco_date}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Volume:</b></td>
+                        <td>{best_contract['volume']:,}</td>
+                        <td><b>OI:</b></td>
+                        <td>{best_contract['open_interest']:,}</td>
+                    </tr>
                 </table>
             </div>
             """, unsafe_allow_html=True)
@@ -649,8 +703,8 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
-        # ========================
-    # PORTFOLIO TAB (HYBRID ADVANCED VERSION - CORRECTED)
+    # ========================
+    # PORTFOLIO TAB (UPDATED WITH EMAIL MANAGEMENT)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -733,43 +787,6 @@ if st.session_state.price and st.session_state.expiries:
             cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
             return cts, ev, d, p_touch
         
-        # Helper function to add trader with email
-        def add_trader_to_sheet(trader_name, email):
-            """Add a new trader with email to the Traders sheet."""
-            sheet = get_google_sheet()
-            if not sheet:
-                return False
-            try:
-                traders_worksheet = sheet.worksheet("Traders")
-            except:
-                traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
-                traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
-            
-            # Check if trader already exists
-            existing = traders_worksheet.findall(trader_name)
-            if existing:
-                return False
-            
-            traders_worksheet.append_row([
-                trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ])
-            return True
-        
-        def get_trader_email(trader_name):
-            """Get email for a trader from Traders sheet."""
-            sheet = get_google_sheet()
-            if not sheet:
-                return None
-            try:
-                traders_worksheet = sheet.worksheet("Traders")
-                records = traders_worksheet.get_all_records()
-                for record in records:
-                    if record.get('trader_name') == trader_name:
-                        return record.get('email')
-                return None
-            except:
-                return None
-        
         # Trader selection
         trader_options = get_trader_list()
         selected_trader = st.selectbox("Select Trader:", trader_options, key="trader_select")
@@ -779,6 +796,7 @@ if st.session_state.price and st.session_state.expiries:
             if st.button("➕ Add New Trader", key="show_add_trader"):
                 st.session_state.show_new_trader = True
         
+        # UPDATED: Add New Trader form with EMAIL field
         if st.session_state.get('show_new_trader', False):
             col_n1, col_n2, col_n3, col_n4 = st.columns([2, 2, 1, 1])
             with col_n1:
@@ -790,10 +808,8 @@ if st.session_state.price and st.session_state.expiries:
                 if st.button("Save", key="save_new_trader"):
                     if new_trader_name and new_trader_name not in trader_options:
                         if new_trader_email and "@" in new_trader_email:
-                            # Add to Traders sheet
                             success = add_trader_to_sheet(new_trader_name, new_trader_email)
                             if success:
-                                # Add placeholder position to Portfolio sheet
                                 dummy_worksheet = init_portfolio_sheet()
                                 if dummy_worksheet:
                                     dummy_worksheet.append_row([
@@ -890,7 +906,6 @@ if st.session_state.price and st.session_state.expiries:
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Current Option Price", f"${option_price:.2f}")
-                            # Fix P&L color - red for negative, green for positive
                             pnl_delta_color = "inverse" if pnl < 0 else "normal"
                             st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_delta_color)
                         with col2:
@@ -913,9 +928,8 @@ if st.session_state.price and st.session_state.expiries:
                             st.metric("Composite Score", f"{cts}/100")
                             st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
                         with col_q2:
-                            # Calculate Theta decay
                             if option_price > 0:
-                                theta_est = (option_price * 0.02) / 365  # Approximate theta
+                                theta_est = (option_price * 0.02) / 365
                                 theta_pct = (theta_est / option_price) * 100 if option_price > 0 else 0
                                 st.metric("Theta Decay", f"{theta_pct:.1f}%/day")
                             else:
@@ -935,7 +949,6 @@ if st.session_state.price and st.session_state.expiries:
                         col_target1, col_target2 = st.columns(2)
                         
                         with col_target1:
-                            # STOP LOSS (left)
                             st.metric("🛑 Stop Loss", f"${stop:.2f}")
                             if option_price > stop:
                                 stop_distance_abs = option_price - stop
@@ -945,12 +958,10 @@ if st.session_state.price and st.session_state.expiries:
                                 stop_distance_abs = stop - option_price
                                 stop_distance_pct = (stop_distance_abs / stop) * 100
                                 st.caption(f"⚠️ ${stop_distance_abs:.2f} below stop (-{stop_distance_pct:.0f}%)")
-                            # Progress bar showing how close to stop (inverse)
                             stop_progress = max(0, min(1, 1 - ((option_price - stop) / (target - stop)))) if target > stop else 0.5
                             st.progress(stop_progress)
                         
                         with col_target2:
-                            # TARGET (right)
                             st.metric("🎯 Target", f"${target:.2f}")
                             if option_price < target:
                                 target_distance_abs = target - option_price
@@ -986,7 +997,7 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # --- ADD NEW POSITION FORM ---
+        # --- ADD NEW POSITION FORM (UPDATED with Email Display) ---
         st.subheader("➕ Add New Position")
         
         if not st.session_state.expiries:
@@ -1022,8 +1033,8 @@ if st.session_state.price and st.session_state.expiries:
                     st.caption(f"⭐ Recommended strike - Mid: ${selected_mid:.2f}")
                 elif cons_strike:
                     st.caption(f"💡 Conservative recommendation: ${cons_strike:.2f} (Mid: ${cons_mid:.2f})")
-
-                                # Show email reminder if trader has no email
+                
+                # NEW: Show email reminder if trader has no email
                 trader_email = get_trader_email(selected_trader)
                 if not trader_email:
                     st.warning(f"⚠️ No email configured for {selected_trader}. Add email when creating trader to receive alerts.")
@@ -1031,7 +1042,7 @@ if st.session_state.price and st.session_state.expiries:
                     st.caption(f"📧 Alerts will be sent to: {trader_email}")
                 
                 st.divider()
-              
+                
                 with st.form("add_position_form"):
                     col1, col2, col3 = st.columns(3)
                     with col1:
