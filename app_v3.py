@@ -649,8 +649,8 @@ if st.session_state.price and st.session_state.expiries:
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
         st.markdown(st.session_state.ai_brief)
 
-    # ========================
-    # PORTFOLIO TAB (HYBRID ADVANCED VERSION)
+        # ========================
+    # PORTFOLIO TAB (HYBRID ADVANCED VERSION - CORRECTED)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -841,7 +841,9 @@ if st.session_state.price and st.session_state.expiries:
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Current Option Price", f"${option_price:.2f}")
-                            st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color="normal")
+                            # Fix P&L color - red for negative, green for positive
+                            pnl_delta_color = "inverse" if pnl < 0 else "normal"
+                            st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_delta_color)
                         with col2:
                             st.metric("Days Left", f"{days_left}")
                             st.metric("Delta", f"{delta_calc:.3f}")
@@ -862,22 +864,56 @@ if st.session_state.price and st.session_state.expiries:
                             st.metric("Composite Score", f"{cts}/100")
                             st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
                         with col_q2:
-                            theta_pct = 0
-                            st.metric("Theta Decay", f"{theta_pct:.1f}%/day")
+                            # Calculate Theta decay
+                            if option_price > 0:
+                                theta_est = (option_price * 0.02) / 365  # Approximate theta
+                                theta_pct = (theta_est / option_price) * 100 if option_price > 0 else 0
+                                st.metric("Theta Decay", f"{theta_pct:.1f}%/day")
+                            else:
+                                st.metric("Theta Decay", "N/A")
                             st.metric("IV", f"{current_iv*100:.1f}%")
                         with col_q3:
                             st.metric("Technical Score", f"{tech_score_pos}/3")
-                            ema_text = "🟢 Bullish" if ema_status in ["bullish", "bullish_cross"] else "🔴 Bearish"
+                            ema_text = "🟢 Bullish" if ema_status in ["bullish", "bullish_cross"] else ("🔴 Bearish" if ema_status in ["bearish", "bearish_cross"] else "⚪ Neutral")
                             st.metric("8/20 EMA", ema_text)
+                            if ema_status == "bullish_cross":
+                                st.caption("🔥 Just crossed bullish")
+                            elif ema_status == "bearish_cross":
+                                st.caption("⚠️ Just crossed bearish")
                         
                         st.markdown("---")
                         st.markdown("### 🎯 Targets")
                         col_target1, col_target2 = st.columns(2)
+                        
                         with col_target1:
-                            st.metric("Target Price", f"${target:.2f}", delta=f"{((option_price/target)-1)*100:+.0f}% to target")
-                            st.progress(min(option_price/target, 1.0))
+                            # STOP LOSS (left)
+                            st.metric("🛑 Stop Loss", f"${stop:.2f}")
+                            if option_price > stop:
+                                stop_distance_abs = option_price - stop
+                                stop_distance_pct = (stop_distance_abs / stop) * 100
+                                st.caption(f"✅ ${stop_distance_abs:.2f} above stop (+{stop_distance_pct:.0f}%)")
+                            else:
+                                stop_distance_abs = stop - option_price
+                                stop_distance_pct = (stop_distance_abs / stop) * 100
+                                st.caption(f"⚠️ ${stop_distance_abs:.2f} below stop (-{stop_distance_pct:.0f}%)")
+                            # Progress bar showing how close to stop (inverse)
+                            stop_progress = max(0, min(1, 1 - ((option_price - stop) / (target - stop)))) if target > stop else 0.5
+                            st.progress(stop_progress)
+                        
                         with col_target2:
-                            st.metric("Stop Loss", f"${stop:.2f}", delta=f"{((option_price/stop)-1)*100:+.0f}% to stop")
+                            # TARGET (right)
+                            st.metric("🎯 Target", f"${target:.2f}")
+                            if option_price < target:
+                                target_distance_abs = target - option_price
+                                target_distance_pct = (target_distance_abs / option_price) * 100
+                                st.caption(f"📈 Need +${target_distance_abs:.2f} (+{target_distance_pct:.0f}%) to target")
+                                progress = option_price / target
+                            else:
+                                target_distance_abs = option_price - target
+                                target_distance_pct = (target_distance_abs / target) * 100
+                                st.caption(f"✅ Target exceeded by ${target_distance_abs:.2f} (+{target_distance_pct:.0f}%)")
+                                progress = 1.0
+                            st.progress(min(progress, 1.0))
                         
                         st.markdown("---")
                         confirm_key = f"confirm_close_{idx}"
@@ -950,7 +986,7 @@ if st.session_state.price and st.session_state.expiries:
                     
                     target_auto = entry_price_pos * (1 + st.session_state.profit_target_pct / 100)
                     stop_auto = entry_price_pos * (1 - st.session_state.stop_loss_pct / 100)
-                    st.info(f"Target: ${target_auto:.2f} | Stop: ${stop_auto:.2f}")
+                    st.info(f"🎯 Target: ${target_auto:.2f} | 🛑 Stop: ${stop_auto:.2f}")
                     
                     expiry_pos = pd.to_datetime(selected_expiry_str).date()
                     cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
