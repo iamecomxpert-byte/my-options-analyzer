@@ -560,7 +560,11 @@ if st.session_state.price and st.session_state.expiries:
                 target_delta = (delta_min + delta_max) / 2
                 best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
             
+            # ========== FULL V2 STYLE RECOMMENDATION DISPLAY ==========
             st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
+            st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
+            
+            # Add liquidity warning prominently if contract is illiquid
             if best_contract['volume'] < 50:
                 st.warning(f"{best_contract['liquidity_status']}: {best_contract['liquidity_warning']}")
             
@@ -569,74 +573,149 @@ if st.session_state.price and st.session_state.expiries:
             reco_hold = min(int(days_to_expiry * 0.4), 45)
             reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
             
-            st.markdown(f"""
-            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1);">
-                <h4 style="margin-top:0;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
-                <table style="width:100%;">
+            # Full HTML table like v2 with ALL metrics
+            reco_html = f"""
+            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
+                <h4 style="margin-top:0; color:#4CAF50;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
+                <table style="width:100%; border:none; color:inherit; margin-top:10px;">
                     <tr>
                         <td><b>Composite Score:</b></td>
                         <td>{best_contract['cts']}/100</td>
-                        <tr><b>Entry:</b></td>
+                        <tr><b>Entry Mid Price:</b></td>
                         <td>${best_contract['mid']:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Target:</b></td>
+                        <td><b>Take Profit Target:</b></td>
                         <td>${reco_exit:.2f}</td>
-                        <td><b>Stop:</b></td>
+                        <td><b>Stop Loss Point:</b></td>
                         <td>${reco_stop:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Hold Limit:</b></td>
+                        <td><b>Max Hold Limit:</b></td>
                         <td>{reco_hold} Days</td>
-                        <td><b>Cutoff:</b></td>
+                        <td><b>Calendar Cutoff Date:</b></td>
                         <td>{reco_date}</td>
                     </tr>
                     <tr>
-                        <td><b>Volume:</b></td>
-                        <td>{best_contract['volume']:,}</td>
-                        <td><b>OI:</b></td>
+                        <td><b>Volume Today:</b></td>
+                        <td>{best_contract['volume']:,} contracts</td>
+                        <td><b>Open Interest:</b></td>
                         <td>{best_contract['open_interest']:,}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Bid-Ask Spread:</b></td>
+                        <td>${best_contract['spread']:.2f} ({best_contract['spread_pct']:.1f}%)</td>
+                        <td><b>Liquidity:</b></td>
+                        <td>{best_contract['liquidity_status']}</td>
                     </tr>
                 </table>
             </div>
-            """, unsafe_allow_html=True)
+            """
+            st.markdown(reco_html, unsafe_allow_html=True)
             
+            # DIVIDER
             st.divider()
+            
+            # COMPARISON SECTION
             st.markdown("### 🔍 Compare Other Strikes")
+            st.markdown("*Select any strike below to see how its mathematical metrics compare to the recommendation above*")
+            
             strike_list = sorted([item['strike'] for item in all_available_contracts])
             default_index = strike_list.index(best_contract['strike']) if best_contract['strike'] in strike_list else 0
             
-            selected_k = st.selectbox(f"Select Strike to Compare:", strike_list, index=default_index, key=f"compare_{tier_label}_{expiry}")
-            selected = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            selected_k = st.selectbox(
+                f"Select Strike to Analyze ({tier_label} Comparison):", 
+                strike_list, 
+                index=default_index, 
+                key=f"compare_{tier_label}_{expiry}"
+            )
             
-            if selected:
-                selected_exit = selected['mid'] * (1 + profit_target_pct / 100)
-                selected_stop = selected['mid'] * (1 - stop_loss_pct / 100)
-                st.markdown("### 📊 Mathematical Output Summary")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Composite Score", f"{selected['cts']}/100")
-                    st.metric("Entry", f"${selected['mid']:.2f}")
-                with col2:
-                    st.metric("Target", f"${selected_exit:.2f}")
-                    st.metric("Stop", f"${selected_stop:.2f}")
-                with col3:
-                    st.metric("Volume", f"{selected['volume']:,}")
-                    st.metric("OI", f"{selected['open_interest']:,}")
-                st.write(f"Delta: {selected['delta']:.3f} | Theta: {selected['theta']:.3f} | Vega: {selected['vega']:.3f}")
-                st.write(f"Touch Prob: {selected['p_touch']*100:.1f}% | EV: {selected['ev']:.3f}")
+            selected_contract = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            
+            if selected_contract:
+                selected_exit = selected_contract['mid'] * (1 + profit_target_pct / 100)
+                selected_stop = selected_contract['mid'] * (1 - stop_loss_pct / 100)
+                selected_hold = min(int(days_to_expiry * 0.4), 45)
+                selected_date = (datetime.now() + timedelta(days=selected_hold)).strftime('%B %d, %Y')
                 
-                # Price chart
-                try:
-                    h_chart = yf.Ticker(selected['symbol']).history(period="1mo")
-                    if not h_chart.empty:
-                        st.caption("📈 Contract Price History (Last 30 days)")
-                        st.line_chart(h_chart['Close'])
-                        if 'Volume' in h_chart.columns:
-                            st.caption("📊 Daily Trading Volume (Last 30 days)")
-                            st.bar_chart(h_chart['Volume'])
-                except:
-                    pass
+                # Show liquidity warning for selected contract if illiquid
+                if selected_contract['volume'] < 50 and selected_k != best_contract['strike']:
+                    st.warning(f"⚠️ {selected_contract['liquidity_status']}: {selected_contract['liquidity_warning']}")
+                
+                st.markdown("### 📊 Mathematical Output Summary")
+                c1, c2, c3 = st.columns([1.5, 1.5, 2])
+                with c1:
+                    if selected_contract['cts'] >= 55 and selected_contract['ev'] > 0:
+                        st.success("✅ STRUCTURAL BUY INSTANCE")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> The odds are highly in your favor. The combination of healthy upward stock momentum, 
+                        a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    elif selected_contract['cts'] >= 40 and selected_contract['ev'] > 0:
+                        st.warning("⚠️ WEAK EDGE PATTERN")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> This option has a mathematical edge, but it is thin. Some charts are flashing mixed signals, 
+                        meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
+                        Statistically, playing these setups results in an outright loss over time.
+                        </p>
+                        """, unsafe_allow_html=True)
+                        
+                    st.metric("Composite Score", f"{selected_contract['cts']}/100")
+                    st.metric("Entry Target", f"${selected_contract['mid']:.2f}")
+                    
+                with c2:
+                    st.metric("Take Profit Target", f"${selected_exit:.2f}")
+                    st.metric("Stop Loss Point", f"${selected_stop:.2f}")
+                    st.write(f"⏱️ **Hold Cutoff:** `{selected_hold} days` ({selected_date})")
+                    st.metric("Volume Today", f"{selected_contract['volume']:,}")
+                    st.metric("Open Interest", f"{selected_contract['open_interest']:,}")
+
+                with c3:
+                    st.write("**Stochastic Engine Outputs**")
+                    st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{selected_contract['delta'] * 100:.1f}%`")
+                    st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{selected_contract['p_touch'] * 100:.1f}%`")
+                    st.write(f"- Expected Valuation ($E[X]$): `{selected_contract['ev']:.3f}`")
+                    st.write(f"- Volatility Index (IV): `{selected_contract['iv']*100:.1f}%` | Daily Theta: `-{abs(selected_contract['theta']):.3f}`")
+                    st.write(f"- Bid-Ask Spread: `${selected_contract['spread']:.2f}` ({selected_contract['spread_pct']:.1f}%)")
+                    
+                    st.markdown("""
+                    <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
+                    <b>📈 What these numbers mean:</b><br>
+                    • <b>Delta Proxy:</b> Estimated chance this contract finishes in the money at expiration.<br>
+                    • <b>Touch Probability:</b> Likelihood the stock price touches this strike before expiry.<br>
+                    • <b>Expected Value ($E[X]$):</b> Net profit expectancy. Positive = favorable risk-reward.<br>
+                    • <b>Daily Theta:</b> Premium value lost each day from time decay.<br>
+                    • <b>Bid-Ask Spread:</b> Transaction cost. Higher spread = more slippage.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.write("")
+                    
+                    # Get historical data for the contract symbol and plot price + volume
+                    try:
+                        h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
+                        if not h_chart.empty:
+                            st.caption("📈 Contract Price History (Last 30 days)")
+                            st.line_chart(h_chart['Close'])
+                            
+                            # Add volume chart below the price chart
+                            if 'Volume' in h_chart.columns and h_chart['Volume'].sum() > 0:
+                                st.caption("📊 Daily Trading Volume (Last 30 days)")
+                                st.bar_chart(h_chart['Volume'])
+                            else:
+                                st.info("Volume history not available for this contract")
+                    except:
+                        st.caption("Historical chart data unavailable for this specific contract")
 
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
