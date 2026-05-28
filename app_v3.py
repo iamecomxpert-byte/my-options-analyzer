@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 import json
 
 # --- PAGE CONFIG MUST BE FIRST ---
-st.set_page_config(page_title="Analyst Pro Options Suite v3.2", layout="wide")
+st.set_page_config(page_title="Analyst Pro Options Suite v4", layout="wide")
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
@@ -58,11 +58,12 @@ def init_portfolio_sheet():
     try:
         worksheet = sheet.worksheet("Portfolio")
     except:
-        worksheet = sheet.add_worksheet(title="Portfolio", rows="1000", cols="20")
+        worksheet = sheet.add_worksheet(title="Portfolio", rows="1000", cols="25")
         headers = [
             "timestamp", "trader_name", "ticker", "strike", "expiry", 
             "contracts", "entry_price", "target_price", "stop_loss", "cutoff_date",
-            "entry_iv", "entry_delta", "status", "last_recommendation", "last_alert_sent"
+            "entry_iv", "entry_delta", "status", "last_recommendation", "last_alert_sent",
+            "total_cost", "total_contracts_purchased", "sold_contracts", "realized_pnl", "avg_entry_price"
         ]
         worksheet.append_row(headers)
     return worksheet
@@ -73,10 +74,11 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     if not worksheet:
         return False
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_cost = contracts * entry_price
     row = [
         now, trader_name, ticker, strike, expiry, contracts, entry_price,
         target_price, stop_loss, cutoff_date, entry_iv, entry_delta,
-        "active", "HOLD", ""
+        "active", "HOLD", "", total_cost, contracts, 0, 0, entry_price
     ]
     worksheet.append_row(row)
     return True
@@ -92,6 +94,18 @@ def get_portfolio_positions(trader_name=None):
             if trader_name and record.get("trader_name") != trader_name:
                 continue
             positions.append((idx, record))
+    return positions
+
+def get_all_positions_for_trader(trader_name):
+    """Get all positions (including closed) for a trader for summary."""
+    worksheet = init_portfolio_sheet()
+    if not worksheet:
+        return []
+    records = worksheet.get_all_records()
+    positions = []
+    for record in records:
+        if record.get("trader_name") == trader_name:
+            positions.append(record)
     return positions
 
 def close_position(row_index):
@@ -148,6 +162,158 @@ def get_trader_email(trader_name):
         return None
     except:
         return None
+
+# --- PORTFOLIO MANAGEMENT FUNCTIONS (NEW for v4) ---
+def update_position_after_add(row_index, additional_contracts, additional_price):
+    """Update position after adding more contracts (average cost method)."""
+    worksheet = init_portfolio_sheet()
+    if not worksheet:
+        return False
+    
+    # Get current values
+    current_contracts = int(worksheet.cell(row_index + 2, 6).value)  # column F
+    current_entry = float(worksheet.cell(row_index + 2, 7).value)    # column G
+    current_total_cost = float(worksheet.cell(row_index + 2, 16).value) if worksheet.cell(row_index + 2, 16).value else current_contracts * current_entry
+    current_total_purchased = int(worksheet.cell(row_index + 2, 17).value) if worksheet.cell(row_index + 2, 17).value else current_contracts
+    
+    # Calculate new values
+    new_total_cost = current_total_cost + (additional_contracts * additional_price)
+    new_total_purchased = current_total_purchased + additional_contracts
+    new_avg_price = new_total_cost / new_total_purchased
+    new_current_contracts = new_total_purchased - (int(worksheet.cell(row_index + 2, 18).value) if worksheet.cell(row_index + 2, 18).value else 0)
+    
+    # Calculate new target and stop based on new average price
+    profit_target_pct = st.session_state.profit_target_pct
+    stop_loss_pct = st.session_state.stop_loss_pct
+    new_target = new_avg_price * (1 + profit_target_pct / 100)
+    new_stop = new_avg_price * (1 - stop_loss_pct / 100)
+    
+    # Update cutoff date based on expiry
+    expiry_str = worksheet.cell(row_index + 2, 5).value
+    expiry_date = pd.to_datetime(expiry_str).date()
+    days_left = (expiry_date - datetime.now().date()).days
+    new_cutoff = expiry_date - timedelta(days=min(int(days_left * 0.4), 45)) if days_left > 0 else expiry_date
+    
+    # Update the sheet
+    worksheet.update_cell(row_index + 2, 6, new_current_contracts)      # contracts
+    worksheet.update_cell(row_index + 2, 7, new_avg_price)              # entry_price (now avg)
+    worksheet.update_cell(row_index + 2, 8, new_target)                 # target_price
+    worksheet.update_cell(row_index + 2, 9, new_stop)                   # stop_loss
+    worksheet.update_cell(row_index + 2, 10, new_cutoff.strftime('%Y-%m-%d'))  # cutoff_date
+    worksheet.update_cell(row_index + 2, 16, new_total_cost)            # total_cost
+    worksheet.update_cell(row_index + 2, 17, new_total_purchased)       # total_contracts_purchased
+    worksheet.update_cell(row_index + 2, 20, new_avg_price)             # avg_entry_price (column T)
+    
+    return True
+
+def update_position_after_sell(row_index, sell_contracts, sell_price):
+    """Update position after selling contracts."""
+    worksheet = init_portfolio_sheet()
+    if not worksheet:
+        return False
+    
+    # Get current values
+    current_contracts = int(worksheet.cell(row_index + 2, 6).value)     # column F
+    current_avg_price = float(worksheet.cell(row_index + 2, 20).value) if worksheet.cell(row_index + 2, 20).value else float(worksheet.cell(row_index + 2, 7).value)
+    current_sold = int(worksheet.cell(row_index + 2, 18).value) if worksheet.cell(row_index + 2, 18).value else 0
+    current_realized_pnl = float(worksheet.cell(row_index + 2, 19).value) if worksheet.cell(row_index + 2, 19).value else 0
+    
+    # Validate
+    if sell_contracts > current_contracts:
+        return False
+    
+    # Calculate realized P&L for this sale
+    pnl_realized = (sell_price - current_avg_price) * sell_contracts * 100
+    
+    # Update values
+    new_sold = current_sold + sell_contracts
+    new_contracts = current_contracts - sell_contracts
+    new_realized_pnl = current_realized_pnl + pnl_realized
+    
+    # Update sheet
+    worksheet.update_cell(row_index + 2, 6, new_contracts)              # contracts
+    worksheet.update_cell(row_index + 2, 18, new_sold)                  # sold_contracts
+    worksheet.update_cell(row_index + 2, 19, new_realized_pnl)          # realized_pnl
+    
+    # If no contracts left, mark as closed
+    if new_contracts == 0:
+        worksheet.update_cell(row_index + 2, 13, "closed")              # status
+    
+    return True
+
+def calculate_portfolio_summary(positions_data):
+    """Calculate total investment, unrealized P&L, realized P&L."""
+    total_investment = 0
+    total_unrealized_pnl = 0
+    total_realized_pnl = 0
+    
+    for pos in positions_data:
+        if pos.get('status') != 'active':
+            total_realized_pnl += float(pos.get('realized_pnl', 0))
+            continue
+        contracts = int(pos['contracts'])
+        entry_price = float(pos['entry_price'])
+        total_investment += contracts * entry_price * 100
+        
+        # Get current option price
+        option_price, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
+        if option_price:
+            unrealized = (option_price - entry_price) * contracts * 100
+            total_unrealized_pnl += unrealized
+        
+        # Get realized P&L from sheet
+        realized = float(pos.get('realized_pnl', 0))
+        total_realized_pnl += realized
+    
+    return total_investment, total_unrealized_pnl, total_realized_pnl
+
+def calculate_risk_score(pos, current_price, current_delta, days_left, current_iv):
+    """Calculate risk score for a position (higher score = higher risk)."""
+    # Position Size Risk (30% weight)
+    entry_price = float(pos['entry_price'])
+    contracts = int(pos['contracts'])
+    position_value = contracts * entry_price * 100
+    size_score = min(position_value / 50000, 1.0)
+    
+    # Delta Risk (25% weight) - lower delta = higher risk
+    delta_score = 1 - min(max(current_delta, 0), 1)
+    
+    # Time Risk (20% weight) - fewer days = higher risk
+    time_score = 1 - min(days_left / 365, 1)
+    
+    # IV Risk (15% weight) - higher IV = higher risk
+    iv_score = min(current_iv * 2, 1) if current_iv else 0.5
+    
+    # Moneyness Risk (10% weight) - OTM = higher risk
+    try:
+        current_stock = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
+        strike = float(pos['strike'])
+        moneyness = current_stock / strike if strike > 0 else 1
+        if moneyness >= 1:
+            moneyness_score = 0
+        else:
+            moneyness_score = 1 - moneyness
+    except:
+        moneyness_score = 0.5
+    
+    risk_score = (size_score * 0.30 + delta_score * 0.25 + time_score * 0.20 + iv_score * 0.15 + moneyness_score * 0.10)
+    return risk_score
+
+def get_current_option_price(ticker, expiry, strike):
+    """Get current mid price for an option."""
+    try:
+        stock_obj = yf.Ticker(ticker)
+        opt_chain = stock_obj.option_chain(expiry)
+        calls = opt_chain.calls
+        option_row = calls[calls['strike'] == float(strike)]
+        if not option_row.empty:
+            row = option_row.iloc[0]
+            mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+            iv = row['impliedVolatility']
+            return mid, iv
+        return None, None
+    except Exception:
+        return None, None
 
 # --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
@@ -581,7 +747,7 @@ if st.session_state.price and st.session_state.expiries:
                     <tr>
                         <td><b>Composite Score:</b></td>
                         <td>{best_contract['cts']}/100</td>
-                        <tr><b>Entry Mid Price:</b></td>
+                        <td><b>Entry Mid Price:</b></td>
                         <td>${best_contract['mid']:.2f}</td>
                     </tr>
                     <tr>
@@ -750,6 +916,13 @@ if st.session_state.price and st.session_state.expiries:
                 st.warning("⚖️ **VERDICT: CAUTION.** Mixed signals.")
             else:
                 st.error("🛑 **VERDICT: STAY AWAY.** Bearish structure.")
+            
+            # RESTORED: View Verdict Logic expander with detailed reasons
+            with st.expander("View Verdict Logic"):
+                for reason in verdict_reasons:
+                    st.write(f"- {reason}")
+                if tech_score < 2:
+                    st.write("- Multiple indicators show declining strength or bearish crossovers.")
 
     with t_ai:
         if st.button("🔄 Refresh AI Analysis"):
@@ -761,7 +934,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB
+    # PORTFOLIO TAB (UPDATED with P&L Summary, Risk Sorting, Add More, Sell)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -821,21 +994,6 @@ if st.session_state.price and st.session_state.expiries:
             except Exception:
                 return []
         
-        def get_current_option_price(ticker, expiry, strike):
-            try:
-                stock_obj = yf.Ticker(ticker)
-                opt_chain = stock_obj.option_chain(expiry)
-                calls = opt_chain.calls
-                option_row = calls[calls['strike'] == strike]
-                if not option_row.empty:
-                    row = option_row.iloc[0]
-                    mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
-                    iv = row['impliedVolatility']
-                    return mid, iv
-                return None, None
-            except Exception:
-                return None, None
-        
         def calculate_composite_score_for_position(current_price, strike, days_left, iv, tech_score):
             d, _, _, _ = calculate_greeks(current_price, strike, max(days_left, 1)/365, 0.05, iv)
             p_touch = calculate_p_touch(current_price, strike, max(days_left, 1)/365, iv)
@@ -870,7 +1028,7 @@ if st.session_state.price and st.session_state.expiries:
                                     dummy_worksheet.append_row([
                                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
                                         new_trader_name, "PLACEHOLDER", 0, "2024-01-01", 
-                                        0, 0, 0, 0, "2024-01-01", 0, 0, "inactive", "", ""
+                                        0, 0, 0, 0, "2024-01-01", 0, 0, "inactive", "", "", 0, 0, 0, 0, 0
                                     ])
                                     st.success(f"Trader '{new_trader_name}' added with email {new_trader_email}!")
                                     st.session_state.show_new_trader = False
@@ -887,16 +1045,60 @@ if st.session_state.price and st.session_state.expiries:
                     st.rerun()
         
         st.divider()
+        
+        # Get all positions for summary and display
+        all_positions = get_all_positions_for_trader(selected_trader)
+        active_positions = get_portfolio_positions(selected_trader)
+        
+        # Calculate and display P&L Summary
+        total_investment, total_unrealized, total_realized = calculate_portfolio_summary(all_positions)
+        
+        st.markdown("### 📊 Portfolio Summary")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            st.metric("💰 Total Investment", f"${total_investment:,.2f}")
+        with col_s2:
+            unrealized_color = "normal" if total_unrealized >= 0 else "inverse"
+            st.metric("📈 Unrealized P&L", f"${total_unrealized:+,.2f}", delta_color=unrealized_color)
+        with col_s3:
+            st.metric("✅ Realized P&L", f"${total_realized:+,.2f}")
+        
+        st.divider()
         st.subheader("📊 Active Positions")
-        positions = get_portfolio_positions(selected_trader)
         
         col_refresh, _ = st.columns([1, 5])
         with col_refresh:
             if st.button("🔄 Refresh", key="refresh_portfolio", use_container_width=True):
                 st.rerun()
         
-        if positions:
-            for idx, (row_idx, pos) in enumerate(positions):
+        if active_positions:
+            # Calculate risk scores for each position
+            positions_with_risk = []
+            for idx, (row_idx, pos) in enumerate(active_positions):
+                try:
+                    strike = float(pos['strike'])
+                    expiry_date = pd.to_datetime(pos['expiry']).date()
+                    days_left = max((expiry_date - datetime.now().date()).days, 0)
+                    
+                    option_price, current_iv = get_current_option_price(pos['ticker'], pos['expiry'], strike)
+                    if option_price:
+                        stock_price = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
+                        d, _, _, _ = calculate_greeks(stock_price, strike, max(days_left, 1)/365, 0.05, current_iv)
+                        current_delta = d
+                    else:
+                        current_delta = 0.5
+                        current_iv = 0.35
+                    
+                    risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv)
+                    positions_with_risk.append((risk_score, idx, row_idx, pos))
+                except:
+                    positions_with_risk.append((0.5, idx, row_idx, pos))
+            
+            # Sort by risk score (highest first)
+            positions_with_risk.sort(key=lambda x: x[0], reverse=True)
+            
+            # Display positions sorted by risk
+            for risk_score, idx, row_idx, pos in positions_with_risk:
                 entry_price = float(pos['entry_price'])
                 contracts = int(pos['contracts'])
                 strike = float(pos['strike'])
@@ -911,6 +1113,14 @@ if st.session_state.price and st.session_state.expiries:
                     days_left = max((pd.to_datetime(expiry_date_str).date() - datetime.now().date()).days, 0)
                     pnl = (option_price - entry_price) * contracts * 100
                     pnl_pct = ((option_price - entry_price) / entry_price) * 100
+                    
+                    # Risk indicator
+                    if risk_score > 0.7:
+                        risk_indicator = "🔴 HIGH"
+                    elif risk_score > 0.4:
+                        risk_indicator = "🟡 MEDIUM"
+                    else:
+                        risk_indicator = "🟢 LOW"
                     
                     # Get technical data
                     try:
@@ -944,19 +1154,21 @@ if st.session_state.price and st.session_state.expiries:
                     )
                     
                     rec_icon = rec_icon_full.split()[0]
-                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f})"
+                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
                     
                     with st.expander(summary):
+                        st.markdown("### 📊 Position Summary")
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Current Option Price", f"${option_price:.2f}")
                             pnl_color = "inverse" if pnl < 0 else "normal"
                             st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
+                            st.metric("Risk Score", f"{risk_score:.2f}", help="Higher = Higher Risk")
                         with col2:
                             st.metric("Days Left", f"{days_left}")
                             st.metric("Delta", f"{delta_calc:.3f}")
                         with col3:
-                            st.metric("Entry Price", f"${entry_price:.2f}")
+                            st.metric("Entry Price (Avg)", f"${entry_price:.2f}")
                             st.metric("Contracts", contracts)
                         
                         st.markdown("---")
@@ -995,21 +1207,42 @@ if st.session_state.price and st.session_state.expiries:
                                 st.progress(1.0)
                         
                         st.markdown("---")
-                        confirm_key = f"confirm_close_{idx}"
-                        if st.checkbox("Confirm close position", key=confirm_key):
-                            if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
-                                close_position(row_idx)
-                                st.success(f"✅ Position closed!")
-                                time.sleep(1)
-                                st.rerun()
+                        st.markdown("### ⚙️ Position Management")
+                        
+                        col_m1, col_m2 = st.columns(2)
+                        
+                        with col_m1:
+                            st.markdown("**➕ Add More Contracts**")
+                            add_qty = st.number_input("Quantity to add:", min_value=1, step=1, key=f"add_qty_{idx}")
+                            add_price = st.number_input("Purchase price:", min_value=0.01, step=0.05, format="%.2f", 
+                                                        value=option_price, key=f"add_price_{idx}")
+                            if st.button("Add More", key=f"add_btn_{idx}"):
+                                success = update_position_after_add(row_idx, add_qty, add_price)
+                                if success:
+                                    st.success(f"Added {add_qty} contracts at ${add_price:.2f}!")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to add. Check inputs.")
+                        
+                        with col_m2:
+                            st.markdown("**💰 Sell Contracts**")
+                            sell_qty = st.number_input("Quantity to sell:", min_value=1, max_value=contracts, step=1, 
+                                                       key=f"sell_qty_{idx}")
+                            sell_price = st.number_input("Sale price:", min_value=0.01, step=0.05, format="%.2f", 
+                                                         value=option_price, key=f"sell_price_{idx}")
+                            if st.button("Sell", key=f"sell_btn_{idx}"):
+                                if sell_qty > contracts:
+                                    st.error(f"Cannot sell more than {contracts} contracts.")
+                                else:
+                                    success = update_position_after_sell(row_idx, sell_qty, sell_price)
+                                    if success:
+                                        st.success(f"Sold {sell_qty} contracts at ${sell_price:.2f}!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to sell.")
                 else:
                     with st.expander(f"⚠️ {ticker} ${strike:.2f} Call | Data unavailable"):
-                        confirm_key = f"confirm_close_{idx}"
-                        if st.checkbox("Confirm close position", key=confirm_key):
-                            if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
-                                close_position(row_idx)
-                                st.success(f"Position closed!")
-                                st.rerun()
+                        st.warning(f"Option price data not available")
         else:
             st.info(f"No active positions for {selected_trader}.")
         
@@ -1077,12 +1310,32 @@ if st.session_state.price and st.session_state.expiries:
                     cutoff_days = min((expiry_pos - datetime.now().date()).days, 45)
                     cutoff_date = datetime.now().date() + timedelta(days=max(cutoff_days, 1))
                     
+                    # Estimate IV and Delta
+                    try:
+                        stock_temp = yf.Ticker(ticker_pos)
+                        current_price_temp = stock_temp.history(period="1d")['Close'].iloc[-1]
+                        option_chain_temp = stock_temp.option_chain(selected_expiry_str)
+                        option_row_temp = option_chain_temp.calls[option_chain_temp.calls['strike'] == selected_strike]
+                        if not option_row_temp.empty:
+                            entry_iv = option_row_temp['impliedVolatility'].iloc[0]
+                            days_to_exp = (expiry_pos - datetime.now().date()).days
+                            d_temp, _, _, _ = calculate_greeks(
+                                current_price_temp, selected_strike, max(days_to_exp, 1) / 365, 0.05, entry_iv
+                            )
+                            entry_delta = d_temp
+                        else:
+                            entry_iv = 0.35
+                            entry_delta = 0.50
+                    except:
+                        entry_iv = 0.35
+                        entry_delta = 0.50
+                    
                     submitted = st.form_submit_button("💾 Save Position", use_container_width=True, type="primary")
                     if submitted:
                         success = add_position_to_sheet(
                             trader_name=selected_trader, ticker=ticker_pos, strike=selected_strike,
                             expiry=selected_expiry_str, contracts=contracts_pos, entry_price=entry_price_pos,
-                            entry_iv=0.35, entry_delta=0.50, target_price=target_auto,
+                            entry_iv=entry_iv, entry_delta=entry_delta, target_price=target_auto,
                             stop_loss=stop_auto, cutoff_date=cutoff_date.strftime('%Y-%m-%d')
                         )
                         if success:
@@ -1091,24 +1344,368 @@ if st.session_state.price and st.session_state.expiries:
                             time.sleep(1)
                             st.rerun()
                         else:
-                            st.error("❌ Failed to save.")
+                            st.error("❌ Failed to save. Check Google Sheets connection.")
 
     # ========================
-    # STRATEGY GUIDE
+    # STRATEGY GUIDE (FULLY RESTORED from v3)
     # ========================
     with t_edu:
-        st.header("📖 Strategy Guide")
+        st.header("📖 Complete Strategy Guide & Indicator Dictionary")
         st.markdown("""
-        **Recommendation Types:**
-        - 🔴 **EXIT - STOP LOSS** - Hit stop loss
-        - 🔴 **EXIT - NO EDGE** - EV turned negative
-        - 🟢 **TAKE PROFITS** - Target reached
-        - 🟡 **PARTIAL EXIT** - 80%+ to target
-        - 🟠 **TIME DECAY** - <7 days left
-        - 🟠 **TECHNICAL EXIT** - Bearish signals
-        - 🟢 **ADD MORE** - High conviction
-        - 🔵 **STRONG HOLD** - All metrics aligned
-        - 🔵 **HOLD** - Normal monitoring
+        Welcome to the complete trading manual. This guide explains every indicator in the app and provides 
+        **actionable guidelines** on how to use them for real trading decisions.
+        """)
+        
+        st.divider()
+        
+        # SECTION 1: LIQUIDITY INDICATORS
+        st.subheader("💧 Liquidity Indicators - Your First Filter")
+        st.markdown("""
+        **Before looking at any other metric, check liquidity first. An option with great Greeks but no volume is a trap you cannot exit.**
+        """)
+        
+        with st.expander("📊 Volume Today - How to Use", expanded=False):
+            st.markdown("""
+            **What it measures:** Number of contracts traded in the current trading day.
+            
+            **Why it matters:** Volume = ability to enter and exit positions without excessive slippage.
+            
+            **Guidelines for Use:**
+            
+            | Volume | Rating | Action |
+            |--------|--------|--------|
+            | 200+ | 🟢 EXCELLENT | Safe to trade any position size |
+            | 100-199 | 🟡 GOOD | Acceptable for positions under 50 contracts |
+            | 50-99 | 🟠 CAUTION | Only for positions under 10 contracts |
+            | 10-49 | 🔴 DANGER | Avoid unless absolutely necessary |
+            | <10 | ⚫ TOXIC | NEVER TRADE - you won't exit |
+            
+            **How to use in trading:**
+            - Filter out any contract with volume < 50 automatically
+            - For larger positions (>20 contracts), require volume > 200
+            - Check volume relative to your intended position size
+            """)
+        
+        with st.expander("📈 Open Interest - What It Tells You", expanded=False):
+            st.markdown("""
+            **What it measures:** Total number of outstanding (unclosed) contracts.
+            
+            **Why it matters:** Open interest shows whether money is flowing into or out of a strike.
+            
+            **Guidelines for Use:**
+            - **Rising OI + Rising Price** = New long money entering -> Bullish signal
+            - **Rising OI + Falling Price** = New short money entering -> Bearish signal
+            - **Falling OI + Rising Price** = Shorts covering -> Potential rally ending
+            - **Falling OI + Falling Price** = Longs exiting -> More downside possible
+            
+            **Minimum thresholds:**
+            - Acceptable: OI > 500 contracts
+            - Good: OI > 1,000 contracts
+            - Excellent: OI > 5,000 contracts
+            
+            **How to use in trading:**
+            - Prefer strikes with OI > 500
+            - Avoid strikes where OI is dropping rapidly (liquidity drying up)
+            - Use OI changes to confirm directional bias
+            """)
+        
+        with st.expander("💰 Bid-Ask Spread - Your Real Transaction Cost", expanded=False):
+            st.markdown("""
+            **What it measures:** Difference between the highest buyer (bid) and lowest seller (ask) price.
+            
+            **Why it matters:** The spread is your immediate loss upon entry. Wide spreads destroy profitability.
+            
+            **Guidelines for Use:**
+            
+            **Spread Percentage Rule of Thumb:**
+            
+            | Spread % | Grade | Trading Implication |
+            |----------|-------|---------------------|
+            | < 2% | 🟢 EXCELLENT | Round-trip cost <4%. Ideal for all strategies. |
+            | 2-5% | 🟡 ACCEPTABLE | Round-trip cost 4-10%. OK for longer holds. |
+            | 5-10% | 🟠 WIDE | Cost 10-20%. Requires large move just to break even. |
+            | > 10% | 🔴 TOXIC | Cost >20%. Avoid at all costs. |
+            
+            **How to calculate spread %:**
+            
+            Spread % = (Ask - Bid) / Mid Price x 100
+            
+            **Real-world example:**
+            - Bid: $1.00, Ask: $1.10, Mid: $1.05
+            - Spread % = ($0.10 / $1.05) x 100 = 9.5%
+            - You lose 9.5% immediately upon entry (buy at $1.10, could only sell at $1.00)
+            
+            **How to use in trading:**
+            - **NEVER** enter with spread > 10%
+            - **ACCEPTABLE** for longer holds (30+ days) if spread < 5%
+            - **REQUIRE** spread < 3% for short-term trades (<14 days)
+            - Use limit orders, never market orders on wide spreads
+            - Calculate your breakeven including spread cost
+            """)
+        
+        with st.expander("🎯 Combined Liquidity Filter - The Rule of 3", expanded=False):
+            st.markdown("""
+            **The Rule of 3 Liquidity Check:**
+            
+            Before trading ANY option, verify all three conditions:
+            
+            1. **Volume > 50** (preferably > 200)
+            2. **Open Interest > 500** (preferably > 1,000)
+            3. **Spread < 5%** (preferably < 3%)
+            
+            **If any condition fails:** Move to the next strike or expiry.
+            
+            **Why this matters:** 
+            Illiquid options have hidden costs that destroy edge. A mathematically perfect trade with 10% spread is actually a losing trade.
+            
+            **Example:**
+            - Mathematical EV: +$50
+            - Spread cost (10% on $500 trade): -$50
+            - Real EV: $0 -> No edge, just paying the market maker
+            """)
+        
+        st.divider()
+        
+        # SECTION 2: CONVICTION INDICATORS
+        st.subheader("🎯 Conviction Indicators - Your Decision Framework")
+        
+        with st.expander("📊 Composite Score (CTS) - The Single Decision Number", expanded=False):
+            st.markdown("""
+            **What it measures:** A weighted combination of Delta (40%), Touch Probability (40%), and Technical Score (20%).
+            
+            **Why it matters:** One number that summarizes the trade's mathematical and technical strength.
+            
+            **Guidelines for Use:**
+            
+            | Score | Rating | Action |
+            |-------|--------|--------|
+            | 70-100 | 🟢 STRONG BUY | High conviction. Size position normally. |
+            | 55-69 | 🟡 MODERATE BUY | Positive edge. Consider smaller position. |
+            | 40-54 | 🟠 WEAK EDGE | Small or negative edge. Size down significantly. |
+            | <40 | 🔴 AVOID | Negative expectancy. Skip entirely. |
+            
+            **How to use in trading:**
+            - Use CTS as your primary filter
+            - Combine with liquidity check: CTS > 55 + Liquidity passes = Trade
+            - For spreads/iron condors, require CTS > 60
+            """)
+        
+        with st.expander("💰 Expected Value (EV) - Long-Term Profitability", expanded=False):
+            st.markdown("""
+            **What it measures:** (Touch Probability x Take Profit Value) - (Loss Probability x Stop Loss Value)
+            
+            **Why it matters:** Positive EV means the math favors you over many trades.
+            
+            **Guidelines for Use:**
+            - **EV > 0.50** -> Strong edge, trade with confidence
+            - **EV > 0.25** -> Moderate edge, trade with normal size
+            - **EV > 0** -> Small edge, size down or monitor
+            - **EV < 0** -> Negative edge, DO NOT TRADE regardless of other metrics
+            
+            **Note:** EV must be evaluated AFTER accounting for spread costs.
+            
+            Real EV = Mathematical EV - Spread Cost
+            """)
+        
+        st.divider()
+        
+        # SECTION 3: GREEKS
+        st.subheader("📊 Greeks - Understanding Your Risk Exposures")
+        
+        with st.expander("🎲 Delta (Δ) - Probability of Profit", expanded=False):
+            st.markdown("""
+            **What it measures:** Estimated probability the option expires in-the-money. Also measures price sensitivity ($0.01 move in stock = Delta x $0.01 change in option).
+            
+            **Guidelines by Strategy:**
+            
+            | Strategy Type | Target Delta | Risk Level |
+            |---------------|--------------|------------|
+            | Conservative | 0.50 - 0.60 | Lower risk, higher probability |
+            | Aggressive | 0.40 - 0.49 | Moderate risk, leveraged |
+            | Speculative | 0.30 - 0.39 | High risk, lottery-like |
+            
+            **How to use in trading:**
+            - Match delta to your risk tolerance
+            - Lower delta = cheaper option, less probability
+            - Higher delta = more expensive, higher probability
+            - As delta drops below 0.30, options behave like lottery tickets
+            """)
+        
+        with st.expander("⏱️ Theta (θ) - Time Decay Cost", expanded=False):
+            st.markdown("""
+            **What it measures:** Daily premium erosion from time passing.
+            
+            **Why it matters:** Theta is your daily cost of holding the option. High theta kills long positions.
+            
+            **Guidelines for Use:**
+            - **Daily theta as % of premium:**
+                - < 1% per day -> Manageable for long holds
+                - 1-2% per day -> Standard for 30-45 DTE
+                - 2-3% per day -> Expensive, needs fast move
+                - > 3% per day -> Too expensive, look for longer expiry
+            
+            **How to use in trading:**
+            - Calculate: Theta % = (Theta x 365) / Premium
+            - For longer holds (30+ days), prefer theta < 1.5% of premium
+            - Set hold duration based on theta: exit before theta accelerates (last 14 days)
+            """)
+        
+        with st.expander("📈 Vega (ν) - Volatility Exposure", expanded=False):
+            st.markdown("""
+            **What it measures:** Option price change for 1% change in implied volatility (IV).
+            
+            **Why it matters:** Vega tells you how much you're betting on volatility expansion.
+            
+            **Guidelines for Use:**
+            - **High Vega (>0.10)** -> Betting on volatility increase (earnings, events)
+            - **Low Vega (<0.05)** -> Volatility movement won't affect you much
+            
+            **How to use in trading:**
+            - Before earnings: Expect high Vega, IV is inflated (option expensive)
+            - Buy Vega when IV is low (30th percentile or lower)
+            - Avoid buying Vega when IV is high (70th percentile+)
+            """)
+        
+        with st.expander("📐 Gamma (Γ) - Acceleration Risk", expanded=False):
+            st.markdown("""
+            **What it measures:** Rate of change of Delta. How fast your position's probability changes as stock moves.
+            
+            **Why it matters:** High gamma means your position can swing dramatically.
+            
+            **Guidelines for Use:**
+            - **Near-term options (<21 DTE)** -> Very high gamma, risky
+            - **Longer-term options (>60 DTE)** -> Lower gamma, more stable
+            - **At-the-money options** -> Highest gamma
+            
+            **How to use in trading:**
+            - Our framework requires 60+ DTE to keep gamma manageable
+            - Avoid high gamma unless you can monitor constantly
+            """)
+        
+        st.divider()
+        
+        # SECTION 4: PROBABILITY METRICS
+        st.subheader("🎲 Probability Metrics - Understanding Your Odds")
+        
+        with st.expander("📐 Path Touch Probability (P_touch)", expanded=False):
+            st.markdown("""
+            **What it measures:** Probability the stock touches your strike price at least once before expiration.
+            
+            **Why it matters:** Touch probability is usually double Delta. It tells you your chance of hitting profit target early.
+            
+            **Guidelines for Use:**
+            - **P_touch > 60%** -> High chance to hit strike, good for taking profits
+            - **P_touch 40-60%** -> Moderate chance, requires patience
+            - **P_touch < 40%** -> Unlikely to touch, set realistic expectations
+            
+            **How to use in trading:**
+            - Use P_touch to set exit strategy: if P_touch is high, plan to exit at touch
+            - Combine with profit target: If P_touch > 60%, consider taking partial profits at touch
+            """)
+        
+        with st.expander("🎯 Delta Proxy (P_ITM)", expanded=False):
+            st.markdown("""
+            **What it measures:** Estimated probability option expires in-the-money.
+            
+            **Why it matters:** Unlike P_touch (touches any time), P_ITM only counts if you hold to expiration.
+            
+            **How to use in trading:**
+            - Don't hold to expiration unless P_ITM > 70%
+            - Exit when Delta drops below 0.25 (probability has deteriorated)
+            - Our framework's exit is based on time (40% of days left) or profit target, not expiration
+            """)
+        
+        st.divider()
+        
+        # SECTION 5: TECHNICAL INDICATORS
+        st.subheader("📈 Technical Indicators - Timing Your Entry")
+        
+        with st.expander("📊 8/20 EMA Crossover", expanded=False):
+            st.markdown("""
+            **What it measures:** Short-term (8-day) vs medium-term (20-day) moving averages.
+            
+            **Why it matters:** Tells you which time frame has control.
+            
+            **How to use in trading:**
+            - Only buy calls when 8 EMA > 20 EMA
+            - Exit when 8 EMA crosses below 20 EMA (momentum loss)
+            - Look for widening gap between EMAs = strengthening trend
+            """)
+        
+        with st.expander("📊 MACD Histogram", expanded=False):
+            st.markdown("""
+            **What it measures:** Difference between MACD line and signal line. Shows momentum acceleration/deceleration.
+            
+            **Why it matters:** Detects whether buying/selling pressure is increasing.
+            
+            **How to use in trading:**
+            - Prefer trades when histogram is rising
+            - Exit if histogram falls significantly (momentum loss)
+            - Combine with EMA crossover for confirmation
+            """)
+        
+        with st.expander("📊 Bollinger Bands", expanded=False):
+            st.markdown("""
+            **What it measures:** Volatility boundaries (20-day SMA ± 2 standard deviations).
+            
+            **Why it matters:** Shows if price is overextended or has room to run.
+            
+            **How to use in trading:**
+            - Best entries: Price near or below middle band (SMA 20)
+            - Avoid chasing price above upper band (overextended)
+            - Band width: Widening bands = increasing volatility, tightening = decreasing
+            """)
+        
+        st.divider()
+        
+        # SECTION 6: COMPLETE TRADE DECISION FRAMEWORK
+        st.subheader("✅ Complete Trade Decision Framework - Step by Step")
+        st.markdown("""
+        Use this exact checklist before entering ANY trade recommended by the app:
+        
+        **Step 1: Liquidity Filter (MANDATORY)**
+        - [ ] Volume > 50 (preferably > 200)
+        - [ ] Open Interest > 500 (preferably > 1,000)
+        - [ ] Spread < 5% (preferably < 3%)
+        
+        *If any fail: Move to next strike.*
+        
+        **Step 2: Strategy Match**
+        - [ ] Does Delta match your risk profile? (Conservative: 0.50-0.60, Aggressive: 0.40-0.49, Speculative: 0.30-0.39)
+        - [ ] Days to expiry > 60 (our framework requirement)
+        
+        **Step 3: Math Confirmation**
+        - [ ] Composite Score > 55 (for normal position size)
+        - [ ] Expected Value > 0.25 (after accounting for spread)
+        
+        **Step 4: Technical Confirmation**
+        - [ ] 8 EMA > 20 EMA (bullish alignment)
+        - [ ] MACD histogram rising (momentum building)
+        - [ ] Price not above upper Bollinger Band (not overextended)
+        
+        **Step 5: Trade Management Plan**
+        - [ ] Set take profit at 40% of premium price
+        - [ ] Set stop loss at 30% of premium price
+        - [ ] Maximum hold = 40% of days to expiry (or 45 days, whichever smaller)
+        - [ ] Exit date = Calendar date shown in recommendation
+        
+        *If all checks pass: Enter the trade with confidence.*
+        *If 2+ checks fail: Skip the trade, wait for better setup.*
+        """)
+        
+        st.warning("""
+        **⚠️ Remember:** No indicator is perfect. The framework increases your odds but cannot guarantee profits.
+        Always size positions appropriately (never risk more than 1-2% of account per trade) and follow your stop losses.
+        """)
+        
+        st.success("""
+        **💡 Pro Tip:** The best trades happen when ALL four filters pass:
+        1. ✅ Liquidity (Volume + OI + Spread)
+        2. ✅ Math (CTS + EV)
+        3. ✅ Technicals (EMAs + MACD + Bollinger)
+        4. ✅ Management (Pre-set exits)
+        
+        When all four align, the probability of success is maximized.
         """)
 
 else:
