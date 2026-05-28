@@ -35,23 +35,26 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
-# --- CACHING FOR YFINANCE DATA (Prevents Rate Limits) ---
+# --- CACHING FOR YFINANCE DATA (Prevents Rate Limits - FIXED for serialization) ---
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_option_chain(ticker, expiry):
-    """Cache option chain data for 5 minutes to prevent rate limits."""
+    """Cache option chain data for 5 minutes - returns calls and puts as DataFrames (serializable)."""
     try:
         stock = yf.Ticker(ticker)
-        return stock.option_chain(expiry)
+        opt_chain = stock.option_chain(expiry)
+        # Return only the DataFrames (serializable)
+        return opt_chain.calls, opt_chain.puts
     except Exception as e:
         st.error(f"Error fetching option chain: {str(e)}")
-        return None
+        return None, None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_stock_history(ticker, period="100d"):
     """Cache stock history data for 5 minutes."""
     try:
         stock = yf.Ticker(ticker)
-        return stock.history(period=period)
+        hist = stock.history(period=period)
+        return hist
     except Exception as e:
         st.error(f"Error fetching stock history: {str(e)}")
         return None
@@ -61,7 +64,9 @@ def get_cached_stock_info(ticker):
     """Cache stock info for 5 minutes."""
     try:
         stock = yf.Ticker(ticker)
-        return stock.info
+        # Convert info dict to a serializable format
+        info = dict(stock.info)
+        return info
     except Exception as e:
         st.error(f"Error fetching stock info: {str(e)}")
         return None
@@ -613,11 +618,11 @@ if fetch_btn:
             with st.spinner("Processing mathematical matrix across options chain..."):
                 for exp_date in valid_global_expiries[:6]:
                     try:
-                        # Use cached option chain
-                        opt_chain_cached = get_cached_option_chain(ticker_input, exp_date)
-                        if opt_chain_cached is None:
+                        # Use cached option chain - FIXED: returns calls_df, puts_df
+                        calls_df, puts_df = get_cached_option_chain(ticker_input, exp_date)
+                        if calls_df is None:
                             continue
-                        opt_chain = opt_chain_cached.calls
+                        opt_chain = calls_df
                         days_exp = (pd.to_datetime(exp_date).date() - today).days
                         t_yrs = days_exp / 365
                         
@@ -710,10 +715,10 @@ if st.session_state.price and st.session_state.expiries:
         if days_to_expiry < 60:
             st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework.")
     
-        # Use cached option chain for strategy tabs
-        chain_cached = get_cached_option_chain(st.session_state.current_ticker, expiry)
-        if chain_cached is not None:
-            chain = chain_cached.calls
+        # Use cached option chain for strategy tabs - FIXED: returns calls_df, puts_df
+        calls_df, puts_df = get_cached_option_chain(st.session_state.current_ticker, expiry)
+        if calls_df is not None:
+            chain = calls_df
         else:
             st.error("Failed to fetch option chain")
             chain = pd.DataFrame()  # Empty fallback
