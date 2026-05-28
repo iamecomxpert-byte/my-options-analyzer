@@ -35,6 +35,49 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
+# --- CACHING FOR YFINANCE DATA (Prevents Rate Limits) ---
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_option_chain(ticker, expiry):
+    """Cache option chain data for 5 minutes to prevent rate limits."""
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.option_chain(expiry)
+    except Exception as e:
+        st.error(f"Error fetching option chain: {str(e)}")
+        return None
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_stock_history(ticker, period="100d"):
+    """Cache stock history data for 5 minutes."""
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.history(period=period)
+    except Exception as e:
+        st.error(f"Error fetching stock history: {str(e)}")
+        return None
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_stock_info(ticker):
+    """Cache stock info for 5 minutes."""
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.info
+    except Exception as e:
+        st.error(f"Error fetching stock info: {str(e)}")
+        return None
+
+@st.cache_data(ttl=60, show_spinner=False)  # Shorter TTL for current price
+def get_cached_current_price(ticker):
+    """Cache current price for 1 minute only (needs to be fresher)."""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1d")
+        if not hist.empty:
+            return hist['Close'].iloc[-1]
+        return None
+    except Exception as e:
+        return None
+
 # --- GOOGLE SHEETS CONNECTION (for Portfolio) ---
 @st.cache_resource
 def get_google_sheet():
@@ -514,6 +557,11 @@ with st.sidebar:
     stop_loss_pct = st.slider("Max Stop Loss (%)", 10, 100, 30, step=5)
     st.session_state.profit_target_pct = profit_target_pct
     st.session_state.stop_loss_pct = stop_loss_pct
+    st.divider()
+    if st.button("🗑️ Clear Cache", help="Clear cached data if you're seeing stale information"):
+        st.cache_data.clear()
+        st.success("Cache cleared! Refresh the page to reload data.")
+        st.rerun()
 
 # --- DATA FETCHING & GLOBAL SCANS ---
 if fetch_btn:
@@ -524,17 +572,23 @@ if fetch_btn:
     st.session_state.global_speculative = None
     
     try:
-        stock_obj = yf.Ticker(ticker_input)
-        hist = stock_obj.history(period="100d")
+        # Use cached stock history
+        hist = get_cached_stock_history(ticker_input, "100d")
         
-        if hist.empty or 'Close' not in hist.columns:
+        if hist is None or hist.empty or 'Close' not in hist.columns:
             st.error(f"❌ No valid history found for {ticker_input}")
             st.session_state.price = None
         else:
             st.session_state.hist_data = hist
             st.session_state.price = hist['Close'].iloc[-1]
-            st.session_name = stock_obj.info.get('longName', ticker_input)
+            
+            # Use cached stock info
+            stock_info = get_cached_stock_info(ticker_input)
+            st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
             st.session_state.stock_name = st.session_name
+            
+            # Get expiries (this is a list, not easily cacheable, but we can still use yfinance directly)
+            stock_obj = yf.Ticker(ticker_input)
             st.session_state.expiries = list(stock_obj.options)
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
@@ -550,16 +604,20 @@ if fetch_btn:
             if st.session_state.price > sma20_val: tech_score += 1
 
             today = datetime.now().date()
-            valid_global_expiries = [exp for exp in stock_obj.options if (pd.to_datetime(exp).date() - today).days >= 60]
+            valid_global_expiries = [exp for exp in st.session_state.expiries if (pd.to_datetime(exp).date() - today).days >= 60]
             
             cons_candidates = []
             aggr_candidates = []
             spec_candidates = []
             
-            with st.spinner("Processing options chain..."):
+            with st.spinner("Processing mathematical matrix across options chain..."):
                 for exp_date in valid_global_expiries[:6]:
                     try:
-                        opt_chain = stock_obj.option_chain(exp_date).calls
+                        # Use cached option chain
+                        opt_chain_cached = get_cached_option_chain(ticker_input, exp_date)
+                        if opt_chain_cached is None:
+                            continue
+                        opt_chain = opt_chain_cached.calls
                         days_exp = (pd.to_datetime(exp_date).date() - today).days
                         t_yrs = days_exp / 365
                         
@@ -580,7 +638,8 @@ if fetch_btn:
                             if 0.50 <= d <= 0.60: cons_candidates.append(c_data)
                             elif 0.40 <= d <= 0.49: aggr_candidates.append(c_data)
                             elif 0.30 <= d <= 0.39: spec_candidates.append(c_data)
-                    except:
+                    except Exception as e:
+                        st.warning(f"Could not process expiry {exp_date}: {str(e)[:50]}")
                         continue
             
             if cons_candidates: st.session_state.global_conservative = max(cons_candidates, key=lambda x: x['ev'])
@@ -642,31 +701,37 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("No contracts met the criteria.")
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Workspace Adjuster")
-    expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
-    days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
-    T_years = max(days_to_expiry, 1) / 365
-
-    if days_to_expiry < 60:
-        st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework.")
-
-    chain = yf.Ticker(st.session_state.current_ticker).option_chain(expiry).calls
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🔍 Workspace Adjuster")
+        expiry = st.sidebar.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries)
+        days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
+        T_years = max(days_to_expiry, 1) / 365
     
-    tech_score = 0
-    verdict_reasons = []
-    if not st.session_state.hist_data.empty:
-        df_tech = st.session_state.hist_data.copy()
-        curr, prev = get_technicals(df_tech)
-        if curr['ema8'] > curr['ema20']:
-            tech_score += 1
-            verdict_reasons.append("Short-term momentum (8 EMA) is leading.")
-        if curr['hist'] > prev['hist']:
-            tech_score += 1
-            verdict_reasons.append("MACD histogram is rising.")
-        if S > curr['sma20']:
-            tech_score += 1
-            verdict_reasons.append("Price is above 20-day baseline.")
+        if days_to_expiry < 60:
+            st.sidebar.warning(f"⚠️ Selected expiry ({days_to_expiry} days) is under the 2+ month framework.")
+    
+        # Use cached option chain for strategy tabs
+        chain_cached = get_cached_option_chain(st.session_state.current_ticker, expiry)
+        if chain_cached is not None:
+            chain = chain_cached.calls
+        else:
+            st.error("Failed to fetch option chain")
+            chain = pd.DataFrame()  # Empty fallback
+        
+        tech_score = 0
+        verdict_reasons = []
+        if not st.session_state.hist_data.empty:
+            df_tech = st.session_state.hist_data.copy()
+            curr, prev = get_technicals(df_tech)
+            if curr['ema8'] > curr['ema20']:
+                tech_score += 1
+                verdict_reasons.append("Short-term momentum (8 EMA) is leading.")
+            if curr['hist'] > prev['hist']:
+                tech_score += 1
+                verdict_reasons.append("MACD histogram is rising.")
+            if S > curr['sma20']:
+                tech_score += 1
+                verdict_reasons.append("Price is above 20-day baseline.")
 
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
         with tab_component:
@@ -949,7 +1014,9 @@ if st.session_state.price and st.session_state.expiries:
                 hist = stock_obj.history(period="100d")
                 if hist.empty:
                     return None, None
-                current_price = hist['Close'].iloc[-1]
+                current_price = get_cached_current_price(ticker)
+                if current_price is None:
+                    current_price = stock.history(period="1d")['Close'].iloc[-1]
                 opt_chain = stock_obj.option_chain(expiry_date)
                 calls = opt_chain.calls
                 df_tech = hist.copy()
