@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 import json
 
 # --- PAGE CONFIG MUST BE FIRST ---
-st.set_page_config(page_title="Analyst Pro Options Suite v3.1", layout="wide")
+st.set_page_config(page_title="Analyst Pro Options Suite v3.2", layout="wide")
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
@@ -35,7 +35,7 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
-# --- GOOGLE SHEETS CONNECTION ---
+# --- GOOGLE SHEETS CONNECTION (for Portfolio) ---
 @st.cache_resource
 def get_google_sheet():
     try:
@@ -114,7 +114,6 @@ def get_trader_list():
         return ["Mukul"]
     return sorted(list(traders))
 
-# ========== NEW: AUTOMATION FUNCTIONS (Added to v3) ==========
 def add_trader_to_sheet(trader_name, email):
     """Add a new trader with email to the Traders sheet."""
     sheet = get_google_sheet()
@@ -126,7 +125,6 @@ def add_trader_to_sheet(trader_name, email):
         traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
         traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
     
-    # Check if trader already exists
     existing = traders_worksheet.findall(trader_name)
     if existing:
         return False
@@ -150,7 +148,6 @@ def get_trader_email(trader_name):
         return None
     except:
         return None
-# ========== END OF NEW FUNCTIONS ==========
 
 # --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
@@ -191,6 +188,12 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
     return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
 
+def bs_price(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0 or S <= 0: return max(0, S-K)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+
 def calculate_p_touch(S, K, T, sigma):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
     d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
@@ -212,94 +215,6 @@ def get_technicals(df):
     df['upper'] = df['sma20'] + (df['std20'] * 2)
     df['lower'] = df['sma20'] - (df['std20'] * 2)
     return df.iloc[-1], df.iloc[-2]
-
-def get_macd_trend(hist_values, days=3):
-    """Determine if MACD histogram is rising or falling."""
-    if len(hist_values) < days:
-        return "stable", 0
-    recent = hist_values[-days:]
-    if all(recent[i] > recent[i-1] for i in range(1, len(recent))):
-        return "rising", days
-    elif all(recent[i] < recent[i-1] for i in range(1, len(recent))):
-        return "falling", days
-    return "stable", 0
-
-def get_ema_cross(curr_ema8, curr_ema20, prev_ema8, prev_ema20):
-    """Determine EMA crossover status."""
-    if curr_ema8 > curr_ema20:
-        if prev_ema8 <= prev_ema20:
-            return "bullish_cross"
-        return "bullish"
-    elif curr_ema8 < curr_ema20:
-        if prev_ema8 >= prev_ema20:
-            return "bearish_cross"
-        return "bearish"
-    return "neutral"
-
-# --- HYBRID RECOMMENDATION ENGINE ---
-def get_hybrid_recommendation(option_price, entry_price, target, stop_loss, 
-                               days_left, current_delta, current_theta, current_iv,
-                               cts, ev, tech_score, ema_status, macd_trend, macd_days,
-                               touch_prob, iv_percentile=None):
-    """
-    Hybrid Quant + Technical Recommendation Engine
-    """
-    pnl_pct = ((option_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-    
-    # ========== TIER 1: RISK OF RUIN (Exit Now) ==========
-    if option_price <= stop_loss:
-        return "🔴 EXIT - STOP LOSS", f"Stop loss hit at ${stop_loss:.2f}"
-    
-    if ev is not None and ev < 0:
-        return "🔴 EXIT - NO EDGE", f"Expected Value negative: ${ev:.2f} after spreads"
-    
-    if cts is not None and cts < 35:
-        return "🔴 EXIT - POOR SCORE", f"Composite Score dropped to {cts}/100"
-    
-    # ========== TIER 2: VOLATILITY SIGNALS ==========
-    if iv_percentile is not None and iv_percentile > 90:
-        return "🔴 SELL VOL", f"IV at {iv_percentile}th percentile - overpriced. Take profits."
-    
-    # ========== TIER 3: PROFIT TARGETS ==========
-    if option_price >= target:
-        return "🟢 TAKE PROFITS", f"Target ${target:.2f} reached (Entry: ${entry_price:.2f})"
-    
-    if option_price >= target * 0.8:
-        if touch_prob > 0.65:
-            return "🟡 PARTIAL EXIT", f"80% to target & {touch_prob:.0f}% touch probability"
-        else:
-            return "🟡 TAKE SOME OFF", f"80% to target - consider taking partial profits"
-    
-    # ========== TIER 4: TIME & PROBABILITY DECAY ==========
-    if days_left < 7:
-        theta_pct = abs(current_theta) / option_price * 100 if current_theta and option_price > 0 else 0
-        return "🟠 TIME DECAY", f"{days_left} days left | Theta: {theta_pct:.1f}%/day"
-    
-    if current_delta < 0.25:
-        return "🟠 PROBABILITY DECAY", f"Delta fell to {current_delta:.2f} (<0.25 threshold)"
-    
-    # ========== TIER 5: TECHNICAL DETERIORATION ==========
-    if ema_status == "bearish_cross":
-        return "🟠 TECHNICAL EXIT", "8 EMA crossed below 20 EMA - momentum turning bearish"
-    
-    if macd_trend == "falling" and macd_days >= 3:
-        return "🟠 TECHNICAL EXIT", f"MACD falling for {macd_days} days - momentum fading"
-    
-    # ========== TIER 6: OPPORTUNITY SIGNALS ==========
-    if (pnl_pct > 0 and pnl_pct < 25 and current_delta > 0.45 and 
-        cts is not None and cts > 65 and ema_status in ["bullish", "bullish_cross"] and 
-        macd_trend == "rising"):
-        kelly_estimate = (pnl_pct / 100) * current_delta * 2
-        return "🟢 ADD MORE", f"High conviction | CTS: {cts} | Kelly: {kelly_estimate:.0f}% | Add at ${option_price:.2f}"
-    
-    # ========== TIER 7: STRONG HOLD CONDITIONS ==========
-    if (cts is not None and cts > 55 and ema_status in ["bullish", "bullish_cross"] and 
-        macd_trend == "rising" and ev is not None and ev > 0.25):
-        return "🔵 STRONG HOLD", f"All metrics aligned | CTS: {cts} | EV: ${ev:.2f}"
-    
-    # ========== DEFAULT: HOLD ==========
-    ev_text = f"EV: ${ev:.2f}" if ev is not None else "EV: N/A"
-    return "🔵 HOLD", f"Normal | {ev_text} | Days: {days_left} | Delta: {current_delta:.2f}"
 
 # --- FETCH NEWS FROM FINNHUB ---
 def fetch_news_finnhub(ticker):
@@ -376,13 +291,44 @@ def get_ai_research(ticker):
     except Exception as e:
         return f"News unavailable"
 
+# --- HYBRID RECOMMENDATION ENGINE (for Portfolio) ---
+def get_hybrid_recommendation(option_price, entry_price, target, stop_loss, 
+                               days_left, current_delta, current_theta, current_iv,
+                               cts, ev, tech_score, ema_status, macd_trend, macd_days,
+                               touch_prob, iv_percentile=None):
+    pnl_pct = ((option_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+    
+    if option_price <= stop_loss:
+        return "🔴 EXIT - STOP LOSS", f"Stop loss hit at ${stop_loss:.2f}"
+    if ev is not None and ev < 0:
+        return "🔴 EXIT - NO EDGE", f"Expected Value negative: ${ev:.2f}"
+    if option_price >= target:
+        return "🟢 TAKE PROFITS", f"Target ${target:.2f} reached"
+    if option_price >= target * 0.8:
+        return "🟡 PARTIAL EXIT", f"80% to target"
+    if days_left < 7:
+        return "🟠 TIME DECAY", f"{days_left} days left"
+    if current_delta < 0.25:
+        return "🟠 PROBABILITY DECAY", f"Delta fell to {current_delta:.2f}"
+    if ema_status == "bearish_cross":
+        return "🟠 TECHNICAL EXIT", "8 EMA crossed below 20 EMA"
+    if macd_trend == "falling" and macd_days >= 3:
+        return "🟠 TECHNICAL EXIT", f"MACD falling for {macd_days} days"
+    if (pnl_pct > 0 and pnl_pct < 25 and current_delta > 0.45 and 
+        cts is not None and cts > 65 and ema_status in ["bullish", "bullish_cross"]):
+        return "🟢 ADD MORE", f"High conviction | CTS: {cts}"
+    if (cts is not None and cts > 55 and ema_status in ["bullish", "bullish_cross"] and 
+        macd_trend == "rising" and ev is not None and ev > 0.25):
+        return "🔵 STRONG HOLD", f"All metrics aligned"
+    return "🔵 HOLD", f"Normal monitoring"
+
 # --- PAGE CONFIG & SESSION STATE ---
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
-    'ai_cache': None, 'profit_target_pct': 40, 'stop_loss_pct': 30
+    'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -398,7 +344,7 @@ with st.sidebar:
     fetch_btn = st.button("🚀 Analyze Options Structure")
     st.divider()
     st.header("🧪 Exit & Hold Adjuster")
-    profit_target_pct = st.slider("Target Option Profit Booking (%)", 10, 150, 40, step=5)
+    profit_target_pct = st.slider("Target Option Profit Booking (%)", 10, 150, 100, step=5)
     stop_loss_pct = st.slider("Max Stop Loss (%)", 10, 100, 30, step=5)
     st.session_state.profit_target_pct = profit_target_pct
     st.session_state.stop_loss_pct = stop_loss_pct
@@ -489,7 +435,7 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Tabs (8 tabs including Portfolio)
+    # Tabs
     t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
         "📋 Global Recs", "🛡️ Conservative", "⚡ Aggressive", 
         "🎰 Speculative", "📊 Technical", "🤖 AI Research", 
@@ -614,7 +560,11 @@ if st.session_state.price and st.session_state.expiries:
                 target_delta = (delta_min + delta_max) / 2
                 best_contract = min(all_available_contracts, key=lambda x: abs(x['delta'] - target_delta))
             
+            # ========== FULL V2 STYLE RECOMMENDATION DISPLAY ==========
             st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
+            st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
+            
+            # Add liquidity warning prominently if contract is illiquid
             if best_contract['volume'] < 50:
                 st.warning(f"{best_contract['liquidity_status']}: {best_contract['liquidity_warning']}")
             
@@ -623,61 +573,149 @@ if st.session_state.price and st.session_state.expiries:
             reco_hold = min(int(days_to_expiry * 0.4), 45)
             reco_date = (datetime.now() + timedelta(days=reco_hold)).strftime('%B %d, %Y')
             
-            st.markdown(f"""
-            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1);">
-                <h4 style="margin-top:0;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
-                <table style="width:100%;">
+            # Full HTML table like v2 with ALL metrics
+            reco_html = f"""
+            <div style="border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; background-color: rgba(76, 175, 80, 0.1); margin-bottom: 25px;">
+                <h4 style="margin-top:0; color:#4CAF50;">🎯 ${best_contract['strike']:.2f} Call Option</h4>
+                <table style="width:100%; border:none; color:inherit; margin-top:10px;">
                     <tr>
                         <td><b>Composite Score:</b></td>
                         <td>{best_contract['cts']}/100</td>
-                        <td><b>Entry:</b></td>
+                        <tr><b>Entry Mid Price:</b></td>
                         <td>${best_contract['mid']:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Target:</b></td>
+                        <td><b>Take Profit Target:</b></td>
                         <td>${reco_exit:.2f}</td>
-                        <td><b>Stop:</b></td>
+                        <td><b>Stop Loss Point:</b></td>
                         <td>${reco_stop:.2f}</td>
                     </tr>
                     <tr>
-                        <td><b>Hold Limit:</b></td>
+                        <td><b>Max Hold Limit:</b></td>
                         <td>{reco_hold} Days</td>
-                        <td><b>Cutoff:</b></td>
+                        <td><b>Calendar Cutoff Date:</b></td>
                         <td>{reco_date}</td>
                     </tr>
                     <tr>
-                        <td><b>Volume:</b></td>
-                        <td>{best_contract['volume']:,}</td>
-                        <td><b>OI:</b></td>
+                        <td><b>Volume Today:</b></td>
+                        <td>{best_contract['volume']:,} contracts</td>
+                        <td><b>Open Interest:</b></td>
                         <td>{best_contract['open_interest']:,}</td>
+                    </tr>
+                    <tr>
+                        <td><b>Bid-Ask Spread:</b></td>
+                        <td>${best_contract['spread']:.2f} ({best_contract['spread_pct']:.1f}%)</td>
+                        <td><b>Liquidity:</b></td>
+                        <td>{best_contract['liquidity_status']}</td>
                     </tr>
                 </table>
             </div>
-            """, unsafe_allow_html=True)
+            """
+            st.markdown(reco_html, unsafe_allow_html=True)
             
+            # DIVIDER
             st.divider()
-            st.markdown("### 🔍 Compare Other Strikes")
-            strike_list = sorted([item['strike'] for item in all_available_contracts])
-            default_index = strike_list.index(best_contract['strike'])
-            selected_k = st.selectbox(f"Select Strike to Compare:", strike_list, index=default_index, key=f"compare_{tier_label}")
-            selected = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
             
-            if selected:
-                selected_exit = selected['mid'] * (1 + profit_target_pct / 100)
-                selected_stop = selected['mid'] * (1 - stop_loss_pct / 100)
+            # COMPARISON SECTION
+            st.markdown("### 🔍 Compare Other Strikes")
+            st.markdown("*Select any strike below to see how its mathematical metrics compare to the recommendation above*")
+            
+            strike_list = sorted([item['strike'] for item in all_available_contracts])
+            default_index = strike_list.index(best_contract['strike']) if best_contract['strike'] in strike_list else 0
+            
+            selected_k = st.selectbox(
+                f"Select Strike to Analyze ({tier_label} Comparison):", 
+                strike_list, 
+                index=default_index, 
+                key=f"compare_{tier_label}_{expiry}"
+            )
+            
+            selected_contract = next((item for item in all_available_contracts if item['strike'] == selected_k), None)
+            
+            if selected_contract:
+                selected_exit = selected_contract['mid'] * (1 + profit_target_pct / 100)
+                selected_stop = selected_contract['mid'] * (1 - stop_loss_pct / 100)
+                selected_hold = min(int(days_to_expiry * 0.4), 45)
+                selected_date = (datetime.now() + timedelta(days=selected_hold)).strftime('%B %d, %Y')
+                
+                # Show liquidity warning for selected contract if illiquid
+                if selected_contract['volume'] < 50 and selected_k != best_contract['strike']:
+                    st.warning(f"⚠️ {selected_contract['liquidity_status']}: {selected_contract['liquidity_warning']}")
+                
                 st.markdown("### 📊 Mathematical Output Summary")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Composite Score", f"{selected['cts']}/100")
-                    st.metric("Entry", f"${selected['mid']:.2f}")
-                with col2:
-                    st.metric("Target", f"${selected_exit:.2f}")
-                    st.metric("Stop", f"${selected_stop:.2f}")
-                with col3:
-                    st.metric("Volume", f"{selected['volume']:,}")
-                    st.metric("OI", f"{selected['open_interest']:,}")
-                st.write(f"Delta: {selected['delta']:.3f} | Theta: {selected['theta']:.3f} | Vega: {selected['vega']:.3f}")
-                st.write(f"Touch Prob: {selected['p_touch']*100:.1f}% | EV: {selected['ev']:.3f}")
+                c1, c2, c3 = st.columns([1.5, 1.5, 2])
+                with c1:
+                    if selected_contract['cts'] >= 55 and selected_contract['ev'] > 0:
+                        st.success("✅ STRUCTURAL BUY INSTANCE")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> The odds are highly in your favor. The combination of healthy upward stock momentum, 
+                        a strong mathematical win rate, and fair contract pricing makes this a premier risk-reward setup.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    elif selected_contract['cts'] >= 40 and selected_contract['ev'] > 0:
+                        st.warning("⚠️ WEAK EDGE PATTERN")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> This option has a mathematical edge, but it is thin. Some charts are flashing mixed signals, 
+                        meaning you have a decent shot, but you must keep your position size smaller and stay strict with your stop-loss.
+                        </p>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.error("❌ NEGATIVE EXPECTANCY AVOID")
+                        st.markdown("""
+                        <p style='font-size:0.85rem; color:rgba(255,255,255,0.75);line-height:1.3;'>
+                        <b>What this means:</b> Stay away. The pricing math on this strike is either too expensive or too far out of reach. 
+                        Statistically, playing these setups results in an outright loss over time.
+                        </p>
+                        """, unsafe_allow_html=True)
+                        
+                    st.metric("Composite Score", f"{selected_contract['cts']}/100")
+                    st.metric("Entry Target", f"${selected_contract['mid']:.2f}")
+                    
+                with c2:
+                    st.metric("Take Profit Target", f"${selected_exit:.2f}")
+                    st.metric("Stop Loss Point", f"${selected_stop:.2f}")
+                    st.write(f"⏱️ **Hold Cutoff:** `{selected_hold} days` ({selected_date})")
+                    st.metric("Volume Today", f"{selected_contract['volume']:,}")
+                    st.metric("Open Interest", f"{selected_contract['open_interest']:,}")
+
+                with c3:
+                    st.write("**Stochastic Engine Outputs**")
+                    st.write(f"- Stat Probability ($P_{{\\text{{ITM}}}}$ Delta Proxy): `{selected_contract['delta'] * 100:.1f}%`")
+                    st.write(f"- Path Touch Probability ($P_{{\\text{{touch}}}}$): `{selected_contract['p_touch'] * 100:.1f}%`")
+                    st.write(f"- Expected Valuation ($E[X]$): `{selected_contract['ev']:.3f}`")
+                    st.write(f"- Volatility Index (IV): `{selected_contract['iv']*100:.1f}%` | Daily Theta: `-{abs(selected_contract['theta']):.3f}`")
+                    st.write(f"- Bid-Ask Spread: `${selected_contract['spread']:.2f}` ({selected_contract['spread_pct']:.1f}%)")
+                    
+                    st.markdown("""
+                    <div style="background-color: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 5px; font-size: 0.85rem; border-left: 3px solid #888;">
+                    <b>📈 What these numbers mean:</b><br>
+                    • <b>Delta Proxy:</b> Estimated chance this contract finishes in the money at expiration.<br>
+                    • <b>Touch Probability:</b> Likelihood the stock price touches this strike before expiry.<br>
+                    • <b>Expected Value ($E[X]$):</b> Net profit expectancy. Positive = favorable risk-reward.<br>
+                    • <b>Daily Theta:</b> Premium value lost each day from time decay.<br>
+                    • <b>Bid-Ask Spread:</b> Transaction cost. Higher spread = more slippage.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.write("")
+                    
+                    # Get historical data for the contract symbol and plot price + volume
+                    try:
+                        h_chart = yf.Ticker(selected_contract['symbol']).history(period="1mo")
+                        if not h_chart.empty:
+                            st.caption("📈 Contract Price History (Last 30 days)")
+                            st.line_chart(h_chart['Close'])
+                            
+                            # Add volume chart below the price chart
+                            if 'Volume' in h_chart.columns and h_chart['Volume'].sum() > 0:
+                                st.caption("📊 Daily Trading Volume (Last 30 days)")
+                                st.bar_chart(h_chart['Volume'])
+                            else:
+                                st.info("Volume history not available for this contract")
+                    except:
+                        st.caption("Historical chart data unavailable for this specific contract")
 
     process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
@@ -685,14 +723,33 @@ if st.session_state.price and st.session_state.expiries:
 
     with t_tech:
         if not st.session_state.hist_data.empty:
-            st.subheader("Technical Indicators")
-            st.line_chart(st.session_state.hist_data[['Close']])
+            st.subheader("Momentum & Volatility Health")
+            c1, c2, c3 = st.columns(3)
+            
+            curr, prev = get_technicals(st.session_state.hist_data)
+            ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
+            c1.metric("8/20 EMA Status", ema_status, f"{curr['ema8'] - curr['ema20']:.2f} delta")
+            if curr['ema8'] > curr['ema20'] and prev['ema8'] <= prev['ema20']:
+                c1.success("🔥 JUST CROSSED BULLISH")
+            
+            macd_dir = "Improving" if curr['hist'] > prev['hist'] else "Fading"
+            c2.metric("MACD Momentum", macd_dir, f"{curr['hist']:.3f} hist")
+            
+            pos = "Upper Half" if S > curr['sma20'] else "Lower Half"
+            c3.metric("Bollinger Position", pos, f"{((S - curr['lower'])/(curr['upper'] - curr['lower']))*100:.1f}% Band")
+            if S > curr['upper']:
+                c3.warning("⚠️ OVEREXTENDED")
+
+            st.divider()
+            st.line_chart(st.session_state.hist_data[['Close', 'ema8', 'ema20', 'upper', 'lower']])
+
+            st.subheader("🏁 Final Technical Verdict")
             if tech_score == 3:
-                st.success("✅ BULLISH - All indicators aligned")
+                st.success("🎯 **VERDICT: INVEST.** All indicators are aligned.")
             elif tech_score == 2:
-                st.warning("⚠️ MIXED - Exercise caution")
+                st.warning("⚖️ **VERDICT: CAUTION.** Mixed signals.")
             else:
-                st.error("❌ BEARISH - Avoid calls")
+                st.error("🛑 **VERDICT: STAY AWAY.** Bearish structure.")
 
     with t_ai:
         if st.button("🔄 Refresh AI Analysis"):
@@ -704,7 +761,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB (UPDATED WITH EMAIL MANAGEMENT)
+    # PORTFOLIO TAB
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -713,7 +770,6 @@ if st.session_state.price and st.session_state.expiries:
             init_portfolio_sheet()
             st.session_state.sheet_initialized = True
         
-        # Helper function to get conservative recommended strike for a given expiry
         def get_conservative_strike_for_expiry(ticker, expiry_date, profit_target_pct, stop_loss_pct):
             try:
                 stock_obj = yf.Ticker(ticker)
@@ -796,7 +852,6 @@ if st.session_state.price and st.session_state.expiries:
             if st.button("➕ Add New Trader", key="show_add_trader"):
                 st.session_state.show_new_trader = True
         
-        # UPDATED: Add New Trader form with EMAIL field
         if st.session_state.get('show_new_trader', False):
             col_n1, col_n2, col_n3, col_n4 = st.columns([2, 2, 1, 1])
             with col_n1:
@@ -857,7 +912,7 @@ if st.session_state.price and st.session_state.expiries:
                     pnl = (option_price - entry_price) * contracts * 100
                     pnl_pct = ((option_price - entry_price) / entry_price) * 100
                     
-                    # Get technical data for this ticker
+                    # Get technical data
                     try:
                         stock = yf.Ticker(ticker)
                         hist = stock.history(period="60d")
@@ -870,44 +925,33 @@ if st.session_state.price and st.session_state.expiries:
                                 tech_score_pos += 1
                             if stock.history(period="1d")['Close'].iloc[-1] > curr['sma20']:
                                 tech_score_pos += 1
-                            hist_values = hist['hist'].dropna().values
-                            macd_trend, macd_days = get_macd_trend(hist_values, 3)
-                            ema_status = get_ema_cross(curr['ema8'], curr['ema20'], prev['ema8'], prev['ema20'])
+                            ema_status = "bullish" if curr['ema8'] > curr['ema20'] else "bearish"
                         else:
                             tech_score_pos = 1
-                            macd_trend, macd_days = "stable", 0
                             ema_status = "neutral"
                     except:
                         tech_score_pos = 1
-                        macd_trend, macd_days = "stable", 0
                         ema_status = "neutral"
                     
-                    # Calculate CTS, EV, Delta, Touch Prob
                     stock_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
                     cts, ev, delta_calc, touch_prob = calculate_composite_score_for_position(
                         stock_price, strike, days_left, current_iv, tech_score_pos
                     )
                     
-                    # Get hybrid recommendation
-                    iv_percentile = 50
                     rec_icon_full, rec_reason = get_hybrid_recommendation(
                         option_price, entry_price, target, stop, days_left, delta_calc, 0, current_iv,
-                        cts, ev, tech_score_pos, ema_status, macd_trend, macd_days, touch_prob, iv_percentile
+                        cts, ev, tech_score_pos, ema_status, "stable", 0, touch_prob, 50
                     )
                     
-                    # Extract short icon for summary
                     rec_icon = rec_icon_full.split()[0]
-                    rec_text = " ".join(rec_icon_full.split()[1:])[:30]
-                    
                     summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f})"
                     
                     with st.expander(summary):
-                        st.markdown("### 📊 Position Summary")
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Current Option Price", f"${option_price:.2f}")
-                            pnl_delta_color = "inverse" if pnl < 0 else "normal"
-                            st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_delta_color)
+                            pnl_color = "inverse" if pnl < 0 else "normal"
+                            st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
                         with col2:
                             st.metric("Days Left", f"{days_left}")
                             st.metric("Delta", f"{delta_calc:.3f}")
@@ -921,87 +965,61 @@ if st.session_state.price and st.session_state.expiries:
                         st.caption(rec_reason)
                         
                         st.markdown("---")
-                        st.markdown("### 📈 Quant Analytics")
-                        col_q1, col_q2, col_q3 = st.columns(3)
-                        with col_q1:
+                        st.markdown("### 📊 Quant Analytics")
+                        q1, q2, q3 = st.columns(3)
+                        with q1:
                             st.metric("Expected Value (EV)", f"${ev:.2f}")
                             st.metric("Composite Score", f"{cts}/100")
                             st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
-                        with col_q2:
-                            if option_price > 0:
-                                theta_est = (option_price * 0.02) / 365
-                                theta_pct = (theta_est / option_price) * 100 if option_price > 0 else 0
-                                st.metric("Theta Decay", f"{theta_pct:.1f}%/day")
-                            else:
-                                st.metric("Theta Decay", "N/A")
+                        with q2:
                             st.metric("IV", f"{current_iv*100:.1f}%")
-                        with col_q3:
+                        with q3:
                             st.metric("Technical Score", f"{tech_score_pos}/3")
-                            ema_text = "🟢 Bullish" if ema_status in ["bullish", "bullish_cross"] else ("🔴 Bearish" if ema_status in ["bearish", "bearish_cross"] else "⚪ Neutral")
-                            st.metric("8/20 EMA", ema_text)
-                            if ema_status == "bullish_cross":
-                                st.caption("🔥 Just crossed bullish")
-                            elif ema_status == "bearish_cross":
-                                st.caption("⚠️ Just crossed bearish")
                         
                         st.markdown("---")
                         st.markdown("### 🎯 Targets")
-                        col_target1, col_target2 = st.columns(2)
-                        
-                        with col_target1:
+                        col_t1, col_t2 = st.columns(2)
+                        with col_t1:
                             st.metric("🛑 Stop Loss", f"${stop:.2f}")
                             if option_price > stop:
-                                stop_distance_abs = option_price - stop
-                                stop_distance_pct = (stop_distance_abs / stop) * 100
-                                st.caption(f"✅ ${stop_distance_abs:.2f} above stop (+{stop_distance_pct:.0f}%)")
+                                st.caption(f"✅ ${option_price - stop:.2f} above stop")
                             else:
-                                stop_distance_abs = stop - option_price
-                                stop_distance_pct = (stop_distance_abs / stop) * 100
-                                st.caption(f"⚠️ ${stop_distance_abs:.2f} below stop (-{stop_distance_pct:.0f}%)")
-                            stop_progress = max(0, min(1, 1 - ((option_price - stop) / (target - stop)))) if target > stop else 0.5
-                            st.progress(stop_progress)
-                        
-                        with col_target2:
+                                st.caption(f"⚠️ ${stop - option_price:.2f} below stop")
+                        with col_t2:
                             st.metric("🎯 Target", f"${target:.2f}")
                             if option_price < target:
-                                target_distance_abs = target - option_price
-                                target_distance_pct = (target_distance_abs / option_price) * 100
-                                st.caption(f"📈 Need +${target_distance_abs:.2f} (+{target_distance_pct:.0f}%) to target")
-                                progress = option_price / target
+                                st.caption(f"📈 Need +${target - option_price:.2f} to target")
+                                st.progress(option_price / target)
                             else:
-                                target_distance_abs = option_price - target
-                                target_distance_pct = (target_distance_abs / target) * 100
-                                st.caption(f"✅ Target exceeded by ${target_distance_abs:.2f} (+{target_distance_pct:.0f}%)")
-                                progress = 1.0
-                            st.progress(min(progress, 1.0))
+                                st.caption("✅ Target reached")
+                                st.progress(1.0)
                         
                         st.markdown("---")
                         confirm_key = f"confirm_close_{idx}"
                         if st.checkbox("Confirm close position", key=confirm_key):
                             if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
                                 close_position(row_idx)
-                                st.success(f"✅ Position {ticker} ${strike:.2f} Call closed!")
+                                st.success(f"✅ Position closed!")
                                 time.sleep(1)
                                 st.rerun()
                 else:
                     with st.expander(f"⚠️ {ticker} ${strike:.2f} Call | Data unavailable"):
-                        st.warning(f"Option price data not available")
                         confirm_key = f"confirm_close_{idx}"
                         if st.checkbox("Confirm close position", key=confirm_key):
                             if st.button("❌ Close Position", key=f"close_{idx}", use_container_width=True):
                                 close_position(row_idx)
-                                st.success(f"Position {ticker} ${strike:.2f} Call closed!")
+                                st.success(f"Position closed!")
                                 st.rerun()
         else:
-            st.info(f"No active positions for {selected_trader}. Add a position below.")
+            st.info(f"No active positions for {selected_trader}.")
         
         st.divider()
         
-        # --- ADD NEW POSITION FORM (UPDATED with Email Display) ---
+        # --- ADD NEW POSITION FORM ---
         st.subheader("➕ Add New Position")
         
         if not st.session_state.expiries:
-            st.warning("Please analyze a ticker first (click 'Analyze Options Structure') before adding positions.")
+            st.warning("Please analyze a ticker first.")
         else:
             current_ticker = st.session_state.current_ticker if st.session_state.current_ticker else "SHOP"
             expiry_options = st.session_state.expiries
@@ -1020,7 +1038,7 @@ if st.session_state.price and st.session_state.expiries:
             all_strikes = get_strikes_for_expiry(current_ticker, selected_expiry_str)
             
             if not all_strikes:
-                st.warning(f"No option data available for {current_ticker} on {selected_expiry_str}")
+                st.warning(f"No option data available for {current_ticker}")
             else:
                 strike_options = [s['strike'] for s in all_strikes]
                 default_strike_index = 0
@@ -1031,13 +1049,11 @@ if st.session_state.price and st.session_state.expiries:
                 
                 if cons_strike and cons_strike == selected_strike:
                     st.caption(f"⭐ Recommended strike - Mid: ${selected_mid:.2f}")
-                elif cons_strike:
-                    st.caption(f"💡 Conservative recommendation: ${cons_strike:.2f} (Mid: ${cons_mid:.2f})")
                 
-                # NEW: Show email reminder if trader has no email
+                # Email reminder
                 trader_email = get_trader_email(selected_trader)
                 if not trader_email:
-                    st.warning(f"⚠️ No email configured for {selected_trader}. Add email when creating trader to receive alerts.")
+                    st.warning(f"⚠️ No email configured for {selected_trader}. Add email when creating trader.")
                 else:
                     st.caption(f"📧 Alerts will be sent to: {trader_email}")
                 
@@ -1075,114 +1091,24 @@ if st.session_state.price and st.session_state.expiries:
                             time.sleep(1)
                             st.rerun()
                         else:
-                            st.error("❌ Failed to save. Check Google Sheets connection.")
+                            st.error("❌ Failed to save.")
 
     # ========================
     # STRATEGY GUIDE
     # ========================
     with t_edu:
-        st.header("📖 Complete Strategy Guide & Indicator Dictionary")
+        st.header("📖 Strategy Guide")
         st.markdown("""
-        Welcome to the complete trading manual. This guide explains every indicator in the app and provides 
-        **actionable guidelines** on how to use them for real trading decisions.
-        """)
-        
-        st.divider()
-        
-        st.subheader("🎯 Recommendation Types - Quick Reference")
-        st.markdown("""
-        | Icon | Recommendation | Meaning |
-        |------|----------------|---------|
-        | 🔴 | EXIT - STOP LOSS | Hit your predefined stop loss |
-        | 🔴 | EXIT - NO EDGE | Expected Value turned negative |
-        | 🔴 | SELL VOL | IV overpriced (>90th percentile) |
-        | 🟢 | TAKE PROFITS | Target reached |
-        | 🟡 | PARTIAL EXIT | 80%+ to target with high touch probability |
-        | 🟠 | TIME DECAY | <7 days left or delta <0.25 |
-        | 🟠 | TECHNICAL EXIT | Bearish crossover or MACD falling |
-        | 🟢 | ADD MORE | High conviction opportunity |
-        | 🔵 | STRONG HOLD | All metrics aligned |
-        | 🔵 | HOLD | Normal, continue monitoring |
-        """)
-        
-        st.divider()
-        
-        st.subheader("💧 Liquidity Indicators - Your First Filter")
-        st.markdown("**Before looking at any other metric, check liquidity first.**")
-        
-        with st.expander("📊 Volume Today - How to Use", expanded=False):
-            st.markdown("""
-            **Guidelines for Use:**
-            | Volume | Rating | Action |
-            |--------|--------|--------|
-            | 200+ | 🟢 EXCELLENT | Safe to trade any position size |
-            | 100-199 | 🟡 GOOD | Acceptable for positions under 50 contracts |
-            | 50-99 | 🟠 CAUTION | Only for positions under 10 contracts |
-            | 10-49 | 🔴 DANGER | Avoid unless absolutely necessary |
-            | <10 | ⚫ TOXIC | NEVER TRADE - you won't exit |
-            """)
-        
-        with st.expander("💰 Bid-Ask Spread - Your Real Transaction Cost", expanded=False):
-            st.markdown("""
-            **Spread Percentage Rule of Thumb:**
-            | Spread % | Grade | Trading Implication |
-            |----------|-------|---------------------|
-            | < 2% | 🟢 EXCELLENT | Round-trip cost <4% |
-            | 2-5% | 🟡 ACCEPTABLE | Round-trip cost 4-10% |
-            | 5-10% | 🟠 WIDE | Cost 10-20% |
-            | > 10% | 🔴 TOXIC | Cost >20% - AVOID |
-            """)
-        
-        st.divider()
-        
-        st.subheader("📊 Greeks - Understanding Your Risk Exposures")
-        st.markdown("""
-        | Greek | What It Measures | Target Range |
-        |-------|------------------|--------------|
-        | Delta (Δ) | Probability of profit / Price sensitivity | Conservative: 0.50-0.60 |
-        | Theta (θ) | Daily time decay | < 2% of premium/day |
-        | Vega (ν) | Volatility exposure | Lower for longer holds |
-        | Gamma (Γ) | Delta acceleration | Manageable with 60+ DTE |
-        """)
-        
-        st.divider()
-        
-        st.subheader("✅ Complete Trade Decision Framework")
-        st.markdown("""
-        **Step 1: Liquidity Filter (MANDATORY)**
-        - [ ] Volume > 50 (preferably > 200)
-        - [ ] Open Interest > 500
-        - [ ] Spread < 5% (preferably < 3%)
-        
-        **Step 2: Strategy Match**
-        - [ ] Delta matches your risk profile
-        - [ ] Days to expiry > 60
-        
-        **Step 3: Math Confirmation**
-        - [ ] Composite Score > 55
-        - [ ] Expected Value > 0.25
-        
-        **Step 4: Technical Confirmation**
-        - [ ] 8 EMA > 20 EMA (bullish)
-        - [ ] MACD histogram rising
-        
-        **Step 5: Trade Management Plan**
-        - [ ] Take profit at 40% above entry
-        - [ ] Stop loss at 30% below entry
-        - [ ] Exit by cutoff date
-        """)
-        
-        st.warning("""
-        **⚠️ Remember:** No indicator is perfect. Always size positions appropriately 
-        (never risk more than 1-2% of account per trade) and follow your stop losses.
-        """)
-        
-        st.success("""
-        **💡 Pro Tip:** The best trades happen when ALL four filters pass:
-        1. ✅ Liquidity (Volume + OI + Spread)
-        2. ✅ Math (CTS + EV)
-        3. ✅ Technicals (EMAs + MACD)
-        4. ✅ Management (Pre-set exits)
+        **Recommendation Types:**
+        - 🔴 **EXIT - STOP LOSS** - Hit stop loss
+        - 🔴 **EXIT - NO EDGE** - EV turned negative
+        - 🟢 **TAKE PROFITS** - Target reached
+        - 🟡 **PARTIAL EXIT** - 80%+ to target
+        - 🟠 **TIME DECAY** - <7 days left
+        - 🟠 **TECHNICAL EXIT** - Bearish signals
+        - 🟢 **ADD MORE** - High conviction
+        - 🔵 **STRONG HOLD** - All metrics aligned
+        - 🔵 **HOLD** - Normal monitoring
         """)
 
 else:
