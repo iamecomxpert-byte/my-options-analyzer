@@ -1122,8 +1122,8 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 Workspace Adjuster")
     
-    # This will show expiries AFTER they've been loaded
-    if st.session_state.expiries:
+    # Only show the dropdown if we have expiries AND data has been fetched successfully
+    if st.session_state.get('data_fetched', False) and st.session_state.expiries:
         # Find index of current selection
         current_index = 0
         if st.session_state.last_selected_expiry in st.session_state.expiries:
@@ -1139,11 +1139,12 @@ with st.sidebar:
         if expiry != st.session_state.get('last_selected_expiry'):
             st.session_state.last_selected_expiry = expiry
             st.rerun()
+    elif fetch_btn:
+        # User just clicked analyze - data is loading
+        st.info("📊 Loading options data... Please wait for tabs to update.")
     else:
-        if fetch_btn:
-            st.info("Loading expiries... Please wait.")
-        else:
-            st.info("👈 Click 'Analyze Options Structure' first to load expiries")
+        # Initial state - nothing fetched yet
+        st.info("👈 Enter a ticker and click 'Analyze Options Structure' to begin")
     
     st.divider()
     if st.button("🗑️ Clear Cache", help="Clear cached data if you're seeing stale information"):
@@ -1178,6 +1179,7 @@ if fetch_btn:
             all_expiries = list(stock_obj.options)
             st.session_state.expiries = all_expiries
             st.success(f"✅ Loaded {len(all_expiries)} expiries")  # Add this to confirm
+            st.session_state.data_fetched = True
             
             # Set default expiry to closest to 90 days
             today = datetime.now().date()
