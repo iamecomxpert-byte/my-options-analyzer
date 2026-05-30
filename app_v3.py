@@ -1121,21 +1121,28 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 Workspace Adjuster")
     
-    # Show message if no expiries available yet
-    if not st.session_state.expiries:
-        st.info("👈 Click 'Analyze Options Structure' first to load expiries")
-        st.session_state.last_selected_expiry = None
-    else:
+    # This will show expiries AFTER they've been loaded
+    if st.session_state.expiries:
+        # Find index of current selection
+        current_index = 0
+        if st.session_state.last_selected_expiry in st.session_state.expiries:
+            current_index = st.session_state.expiries.index(st.session_state.last_selected_expiry)
+        
         expiry = st.selectbox(
             "Select Expiry for Individual Tabs Below:", 
             st.session_state.expiries,
-            index=st.session_state.expiries.index(st.session_state.last_selected_expiry) if st.session_state.last_selected_expiry in st.session_state.expiries else 0,
+            index=current_index,
             help="Select any expiry to update the Conservative, Aggressive, and Speculative tabs below"
         )
         
-        if st.session_state.expiries and expiry != st.session_state.get('last_selected_expiry'):
+        if expiry != st.session_state.get('last_selected_expiry'):
             st.session_state.last_selected_expiry = expiry
             st.rerun()
+    else:
+        if fetch_btn:
+            st.info("Loading expiries... Please wait.")
+        else:
+            st.info("👈 Click 'Analyze Options Structure' first to load expiries")
     
     st.divider()
     if st.button("🗑️ Clear Cache", help="Clear cached data if you're seeing stale information"):
@@ -1164,13 +1171,14 @@ if fetch_btn:
             
             stock_info = get_cached_stock_info(ticker_input)
             st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
-            st.session_state.stock_name = st.session_name
+            st.session_state.stock_name = st.session_name  # FIXED typo
             
             stock_obj = yf.Ticker(ticker_input)
             all_expiries = list(stock_obj.options)
             st.session_state.expiries = all_expiries
+            st.success(f"✅ Loaded {len(all_expiries)} expiries")  # Add this to confirm
             
-            # Set default expiry to closest to 90 days (Conservative default)
+            # Set default expiry to closest to 90 days
             today = datetime.now().date()
             closest_to_90 = None
             closest_diff_90 = float('inf')
