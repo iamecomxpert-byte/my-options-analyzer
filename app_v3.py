@@ -376,16 +376,24 @@ def calculate_portfolio_summary(positions_data):
     
     return total_investment, total_unrealized_pnl, total_realized_pnl
 
-def calculate_risk_score(pos, current_price, current_delta, days_left, current_iv):
+def calculate_risk_score(pos, current_price, current_delta, days_left, current_iv, sentiment_adjustment=0):
+    """Calculate risk score for a position (higher score = higher risk)."""
+    # Position Size Risk (25% weight - reduced from 30%)
     entry_price = float(pos['entry_price'])
     contracts = int(pos['contracts'])
     position_value = contracts * entry_price * 100
     size_score = min(position_value / 50000, 1.0)
     
+    # Delta Risk (20% weight - reduced from 25%)
     delta_score = 1 - min(max(current_delta, 0), 1)
+    
+    # Time Risk (15% weight - reduced from 20%)
     time_score = 1 - min(days_left / 365, 1)
+    
+    # IV Risk (15% weight - unchanged)
     iv_score = min(current_iv * 2, 1) if current_iv else 0.5
     
+    # Moneyness Risk (10% weight - unchanged)
     try:
         current_stock = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
         strike = float(pos['strike'])
@@ -397,7 +405,18 @@ def calculate_risk_score(pos, current_price, current_delta, days_left, current_i
     except:
         moneyness_score = 0.5
     
-    risk_score = (size_score * 0.30 + delta_score * 0.25 + time_score * 0.20 + iv_score * 0.15 + moneyness_score * 0.10)
+    # NEW: Sentiment Risk (15% weight)
+    sentiment_score_normalized = max(-1, min(1, -sentiment_adjustment / 50))  # Convert adjustment to -1 to 1
+    sentiment_risk = (1 - sentiment_score_normalized) / 2  # 0 = bearish (high risk), 1 = bullish (low risk)
+    
+    # Recalculate weights with sentiment
+    risk_score = (size_score * 0.20 + 
+                  delta_score * 0.20 + 
+                  time_score * 0.15 + 
+                  iv_score * 0.15 + 
+                  moneyness_score * 0.10 +
+                  sentiment_risk * 0.20)
+    
     return risk_score
 
 def get_current_option_price(ticker, expiry, strike):
@@ -511,45 +530,148 @@ def fetch_news_finnhub(ticker):
         return None
 
 def get_ai_research(ticker):
+    """Enhanced AI research with JSON mode for sentiment scoring."""
     groq_api_key = st.secrets.get("GROQ_API_KEY")
-    cache_key = f"news_summary_{ticker}"
+    cache_key = f"news_sentiment_{ticker}"
     cached_response = st.session_state.ai_cache.get(cache_key)
     if cached_response:
         return cached_response
+    
     news_articles = fetch_news_finnhub(ticker)
     if not news_articles:
         return f"ℹ️ No recent news found for {ticker}"
+    
+    # Get current price for context
+    current_price = get_cached_current_price(ticker)
+    price_context = f" at ${current_price:.2f}" if current_price else ""
+    
     news_text = "\n\n".join([
         f"**News {i+1}** (Source: {item['publisher']}, Time: {item['datetime']})\n"
         f"Title: {item['title']}\n"
         f"Summary: {item['summary']}"
         for i, item in enumerate(news_articles)
     ])
+    
+    # Enhanced prompt requesting JSON output
     prompt = f"""
-    You are a financial analyst. Below are the latest {len(news_articles)} news articles for stock {ticker}.
+    You are a quantitative financial analyst. Analyze the following news articles for stock {ticker}{price_context}.
     
     NEWS ARTICLES:
     {news_text}
     
-    Based ONLY on these news articles, provide a concise analysis:
-    1. **Analyst Consensus**
-    2. **Key Catalysts**
-    3. **Sentiment Drivers**
-    4. **Actionable View** (Bullish/Neutral/Cautious)
+    Return ONLY valid JSON. Do not include any other text. Use this exact structure:
+    {{
+        "sentiment_score": float between -1.0 and 1.0,
+        "sentiment_label": "Bullish" or "Neutral" or "Bearish",
+        "catalyst": "description of upcoming event or null",
+        "catalyst_date": "YYYY-MM-DD or null",
+        "catalyst_impact": "High/Medium/Low or null",
+        "key_themes": ["theme1", "theme2", "theme3"],
+        "summary": "brief 1-sentence summary",
+        "risk_adjustment": integer between -20 and 20
+    }}
+    
+    Guidelines:
+    - sentiment_score: +0.7 to +1.0 = strongly bullish, +0.3 to +0.7 = mildly bullish, 
+                       -0.3 to +0.3 = neutral, -0.7 to -0.3 = mildly bearish, -1.0 to -0.7 = strongly bearish
+    - catalyst: Only include if an event is mentioned within next 30 days
+    - risk_adjustment: How much to adjust risk score (-20 = lower risk, +20 = higher risk)
     """
+    
     try:
         client = Groq(api_key=groq_api_key)
         response_text = call_groq_with_retry(client, prompt)
+        
         if response_text is None:
+            # Fallback to simple summary
             result = f"### 📰 Recent News for {ticker}\n\n"
             for i, item in enumerate(news_articles[:5]):
                 result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']}\n\n"
+            result += "\n*💡 AI sentiment analysis temporarily unavailable*"
+            sentiment_data = {
+                "sentiment_score": 0.0,
+                "sentiment_label": "Neutral",
+                "catalyst": None,
+                "catalyst_date": None,
+                "catalyst_impact": None,
+                "key_themes": [],
+                "summary": "AI analysis unavailable",
+                "risk_adjustment": 0
+            }
         else:
-            result = f"### 📰 AI Summary for {ticker}\n\n{response_text}"
+            # Parse JSON response
+            import json as json_lib
+            try:
+                # Extract JSON from response (in case Groq adds extra text)
+                json_start = response_text.find('{')
+                json_end = response_text.rfind('}') + 1
+                if json_start != -1 and json_end > json_start:
+                    json_str = response_text[json_start:json_end]
+                    sentiment_data = json_lib.loads(json_str)
+                else:
+                    raise ValueError("No JSON found")
+            except:
+                # Fallback if JSON parsing fails
+                sentiment_data = {
+                    "sentiment_score": 0.0,
+                    "sentiment_label": "Neutral",
+                    "catalyst": None,
+                    "catalyst_date": None,
+                    "catalyst_impact": None,
+                    "key_themes": [],
+                    "summary": response_text[:200],
+                    "risk_adjustment": 0
+                }
+            
+            # Store sentiment in session state for other tabs
+            st.session_state.current_sentiment = sentiment_data
+            
+            # Build formatted result
+            sentiment_color = "🟢" if sentiment_data['sentiment_score'] > 0.3 else ("🔴" if sentiment_data['sentiment_score'] < -0.3 else "⚪")
+            result = f"""
+### 🤖 AI Sentiment Analysis for {ticker}
+
+{sentiment_color} **Sentiment Score:** {sentiment_data['sentiment_score']:.2f} ({sentiment_data['sentiment_label']})
+
+**Key Themes:**
+"""
+            for theme in sentiment_data.get('key_themes', [])[:3]:
+                result += f"- {theme}\n"
+            
+            if sentiment_data.get('catalyst'):
+                result += f"""
+**📅 Catalyst Detected:** {sentiment_data['catalyst']}
+   - Date: {sentiment_data.get('catalyst_date', 'TBD')}
+   - Impact: {sentiment_data.get('catalyst_impact', 'Medium')}
+"""
+            
+            result += f"""
+**📝 Summary:** {sentiment_data.get('summary', 'No summary available')}
+
+---
+### 📰 News Headlines
+"""
+            for i, item in enumerate(news_articles[:5]):
+                result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']} | 🕐 {item['datetime']}\n\n"
+        
+        # Cache the result
         st.session_state.ai_cache.set(cache_key, result)
+        
+        # Store sentiment in session state for dashboard
+        if 'current_sentiment' not in st.session_state:
+            st.session_state.current_sentiment = sentiment_data if 'sentiment_data' in dir() else {
+                "sentiment_score": 0.0,
+                "sentiment_label": "Neutral",
+                "risk_adjustment": 0
+            }
+        
         return result
+        
     except Exception as e:
-        return f"News unavailable"
+        fallback = f"### 📰 Recent News for {ticker}\n\n"
+        for i, item in enumerate(news_articles[:5]):
+            fallback += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']} | 🕐 {item['datetime']}\n\n"
+        return fallback
 
 # --- HYBRID RECOMMENDATION ENGINE (for Portfolio) ---
 def get_hybrid_recommendation(option_price, entry_price, target, stop_loss, 
@@ -714,8 +836,8 @@ if st.session_state.price and st.session_state.expiries:
         "📂 Portfolio", "📖 Strategy Guide"
     ])
 
-    # ========================
-    # NEW DASHBOARD TAB (Phase 1)
+        # ========================
+    # DASHBOARD TAB (Enhanced with Sentiment)
     # ========================
     with t_dashboard:
         st.header("📊 Trading Dashboard")
@@ -753,7 +875,7 @@ if st.session_state.price and st.session_state.expiries:
                 if days_to_earnings < 0:
                     st.metric("Next Earnings", "Recently passed", delta="No immediate risk")
                 elif days_to_earnings < 7:
-                    st.warning(f"⚠️ Earnings in {days_to_earnings} days - Consider avoiding new positions")
+                    st.warning(f"⚠️ Earnings in {days_to_earnings} days")
                     st.metric("Earnings Warning", f"In {days_to_earnings} days", delta="HIGH RISK")
                 else:
                     st.metric("Next Earnings", earnings_date.strftime('%Y-%m-%d'), delta=f"In {days_to_earnings} days")
@@ -762,12 +884,58 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
+        # NEW: Sentiment Section
+        st.subheader("🤖 AI Market Sentiment")
+        
+        # Get or compute sentiment
+        sentiment_data = getattr(st.session_state, 'current_sentiment', None)
+        if sentiment_data and sentiment_data.get('sentiment_score') != 0:
+            sentiment_score = sentiment_data.get('sentiment_score', 0)
+            sentiment_label = sentiment_data.get('sentiment_label', 'Neutral')
+            
+            col_s1, col_s2, col_s3 = st.columns(3)
+            with col_s1:
+                if sentiment_score > 0.3:
+                    st.success(f"**Sentiment: {sentiment_label}**")
+                    st.metric("Sentiment Score", f"+{sentiment_score:.2f}", delta="Bullish")
+                elif sentiment_score < -0.3:
+                    st.error(f"**Sentiment: {sentiment_label}**")
+                    st.metric("Sentiment Score", f"{sentiment_score:.2f}", delta="Bearish")
+                else:
+                    st.info(f"**Sentiment: {sentiment_label}**")
+                    st.metric("Sentiment Score", f"{sentiment_score:.2f}", delta="Neutral")
+            
+            with col_s2:
+                risk_adj = sentiment_data.get('risk_adjustment', 0)
+                if risk_adj > 0:
+                    st.warning(f"Risk Adjustment: +{risk_adj}")
+                    st.caption("Sentiment increases risk")
+                elif risk_adj < 0:
+                    st.info(f"Risk Adjustment: {risk_adj}")
+                    st.caption("Sentiment decreases risk")
+                else:
+                    st.caption("No risk adjustment")
+            
+            with col_s3:
+                catalyst = sentiment_data.get('catalyst')
+                if catalyst:
+                    st.info(f"📅 **Catalyst:** {catalyst[:50]}...")
+                else:
+                    st.caption("No immediate catalysts detected")
+        else:
+            st.info("Run AI Research in the AI tab to get sentiment analysis")
+            if st.button("🔍 Analyze Sentiment Now"):
+                st.session_state.ai_brief = ""
+                st.rerun()
+        
+        st.divider()
+        
         # Active Positions Summary
         st.subheader("📋 Active Positions Summary")
-        positions = get_portfolio_positions("Mukul")  # Default trader for dashboard
+        positions = get_portfolio_positions("Mukul")
         if positions:
             pos_data = []
-            for idx, (row_idx, pos) in enumerate(positions[:5]):  # Show top 5
+            for idx, (row_idx, pos) in enumerate(positions[:5]):
                 entry = float(pos['entry_price'])
                 contracts = int(pos['contracts'])
                 option_price, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
@@ -792,9 +960,13 @@ if st.session_state.price and st.session_state.expiries:
         col_q1, col_q2, col_q3 = st.columns(3)
         with col_q1:
             if st.button("🔍 Analyze Current Ticker", use_container_width=True):
-                st.switch_page("app_v5.py")  # Refresh effectively
+                st.rerun()
         with col_q2:
-            st.link_button("📂 Go to Portfolio", "#", use_container_width=True)
+            if st.button("🤖 Refresh Sentiment", use_container_width=True):
+                st.session_state.ai_brief = ""
+                if 'current_sentiment' in st.session_state:
+                    del st.session_state.current_sentiment
+                st.rerun()
         with col_q3:
             if st.button("🗑️ Clear Cache", use_container_width=True):
                 st.cache_data.clear()
@@ -1103,12 +1275,16 @@ if st.session_state.price and st.session_state.expiries:
                     st.write("- Multiple indicators show declining strength or bearish crossovers.")
 
     with t_ai:
-        if st.button("🔄 Refresh AI Analysis"):
+        if st.button("🔄 Refresh AI Analysis", use_container_width=True):
             st.session_state.ai_brief = ""
+            if 'current_sentiment' in st.session_state:
+                del st.session_state.current_sentiment
             st.rerun()
+        
         if not st.session_state.ai_brief:
-            with st.spinner("Fetching AI analysis..."):
+            with st.spinner("Fetching latest news and generating AI sentiment analysis..."):
                 st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+        
         st.markdown(st.session_state.ai_brief)
 
     # ========================
