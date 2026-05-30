@@ -1164,7 +1164,7 @@ if fetch_btn:
             
             stock_info = get_cached_stock_info(ticker_input)
             st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
-            st.session_state.stock_name = st_session_name
+            st.session_state.stock_name = st.session_name
             
             stock_obj = yf.Ticker(ticker_input)
             all_expiries = list(stock_obj.options)
