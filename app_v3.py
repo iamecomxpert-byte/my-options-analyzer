@@ -2105,7 +2105,7 @@ if st.session_state.price and st.session_state.expiries:
                     expiry_date = pd.to_datetime(pos['expiry']).date()
                     days_left = max((expiry_date - datetime.now().date()).days, 0)
                     
-                    option_price, current_iv = get_current_option_price(pos['ticker'], pos['expiry'], strike)
+                    option_price, current_iv, _, _ = = get_current_option_price(pos['ticker'], pos['expiry'], strike)
                     if option_price:
                         stock_price = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
                         d, _, _, _ = calculate_greeks(stock_price, strike, max(days_left, 1)/365, 0.05, current_iv)
@@ -2133,7 +2133,7 @@ if st.session_state.price and st.session_state.expiries:
                 target = float(pos['target_price'])
                 stop = float(pos['stop_loss'])
                 
-                option_price, current_iv = get_current_option_price(ticker, expiry_date_str, strike)
+                option_price, current_iv, _, _ = = get_current_option_price(ticker, expiry_date_str, strike)
                 
                 risk_score_display = risk_score
                 beta_factor_display = beta_factor if 'beta_factor' in locals() else 1.0
