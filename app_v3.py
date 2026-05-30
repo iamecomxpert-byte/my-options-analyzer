@@ -1523,7 +1523,7 @@ if st.session_state.price and st.session_state.expiries:
         # Removed the sidebar expiry selector from here (moved to sidebar)
         # The sidebar now has the expiry selector directly
 
-    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label):
+    def process_tier_strategy(tab_component, delta_min, delta_max, tier_label, tech_score):
         with tab_component:
             # Use the expiry from sidebar
             current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
@@ -1714,9 +1714,9 @@ if st.session_state.price and st.session_state.expiries:
                     except:
                         st.caption("Historical chart data unavailable")
 
-    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative")
-    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive")
-    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative")
+    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative", tech_score)
+    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", tech_score)
+    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", tech_score)
 
     with t_tech:
         if not st.session_state.hist_data.empty:
@@ -1780,12 +1780,8 @@ if st.session_state.price and st.session_state.expiries:
             else:
                 st.error("🛑 **VERDICT: STAY AWAY.** Bearish structure.")
             
-            # Initialize verdict_reasons list if it doesn't exist
-            if 'verdict_reasons' not in dir():
-                verdict_reasons = []
-            
             with st.expander("View Verdict Logic"):
-                if verdict_reasons:
+                if 'verdict_reasons' in locals() and verdict_reasons:
                     for reason in verdict_reasons:
                         st.write(f"- {reason}")
                 if tech_score < 2:
