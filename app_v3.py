@@ -134,7 +134,7 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
     Uses quadratic solution: 0.5*Gamma*(ΔS)² + Delta*(ΔS) + Theta*days - target_gain = 0
     """
     try:
-        target_option = option_price * (1 + target_gain_pct)  # 50% gain on option
+        target_option = option_price * (1 + target_gain_pct)
         target_gain = target_option - option_price
         
         a = 0.5 * gamma
@@ -147,13 +147,10 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
                 delta_S = (-b + np.sqrt(discriminant)) / (2*a)
                 target_stock = stock_price + delta_S
             else:
-                # Fallback: use delta-only approximation
                 target_stock = stock_price + (target_gain / delta) if delta > 0 else stock_price * 1.05
         else:
-            # Linear approximation (gamma near zero)
             target_stock = stock_price + (target_gain / delta) if delta > 0 else stock_price * 1.05
         
-        # Calculate stop loss (25% option loss)
         stop_option = option_price * 0.75
         stop_gain = stop_option - option_price
         c_stop = (theta * days) - stop_gain
@@ -184,18 +181,16 @@ def calculate_put_call_ratio(ticker, expiry):
     try:
         calls_df, puts_df = get_cached_option_chain(ticker, expiry)
         if calls_df is None or puts_df is None:
-            return None, None, None
+            return None, None, None, None, None
         
-        # Get total volume for calls and puts
         call_volume = calls_df['volume'].sum() if 'volume' in calls_df.columns else 0
         put_volume = puts_df['volume'].sum() if 'volume' in puts_df.columns else 0
         
         if call_volume == 0:
-            return None, None, None
+            return None, None, None, None, None
         
         pc_ratio = put_volume / call_volume
         
-        # Interpret the ratio
         if pc_ratio > 1.2:
             sentiment = "🔴 Bearish (High put volume)"
             interpretation = "Market participants are hedging or expecting downside"
@@ -225,11 +220,9 @@ def calculate_beta(ticker, market_ticker="SPY", period="1y"):
         if stock_hist.empty or market_hist.empty:
             return 1.0, "Insufficient data"
         
-        # Calculate daily returns
         stock_returns = stock_hist['Close'].pct_change().dropna()
         market_returns = market_hist['Close'].pct_change().dropna()
         
-        # Align dates
         common_dates = stock_returns.index.intersection(market_returns.index)
         if len(common_dates) < 30:
             return 1.0, "Insufficient data"
@@ -237,7 +230,6 @@ def calculate_beta(ticker, market_ticker="SPY", period="1y"):
         stock_returns_aligned = stock_returns[common_dates]
         market_returns_aligned = market_returns[common_dates]
         
-        # Calculate beta = covariance(stock, market) / variance(market)
         covariance = np.cov(stock_returns_aligned, market_returns_aligned)[0][1]
         variance = np.var(market_returns_aligned)
         
@@ -246,7 +238,6 @@ def calculate_beta(ticker, market_ticker="SPY", period="1y"):
         
         beta = covariance / variance
         
-        # Interpret beta
         if beta > 1.5:
             interpretation = "🔴 HIGH BETA - Significantly more volatile than market"
         elif beta > 1.2:
@@ -267,7 +258,6 @@ def calculate_beta_adjusted_risk(base_risk_score, beta):
     Adjust risk score based on stock's beta.
     Higher beta = higher risk adjustment, Lower beta = lower risk adjustment
     """
-    # Beta adjustment factor: beta=1 → 1.0, beta=2 → 1.3, beta=0.5 → 0.7
     adjustment_factor = 0.7 + (beta * 0.3)
     adjustment_factor = max(0.5, min(1.5, adjustment_factor))
     
@@ -297,7 +287,6 @@ def calculate_skew(calls_df, puts_df, current_price, at_the_money_strike=None):
         else:
             atm_strike = at_the_money_strike
         
-        # Find ATM options
         call_atm = calls_df.iloc[(calls_df['strike'] - atm_strike).abs().argsort()[:1]]
         put_atm = puts_df.iloc[(puts_df['strike'] - atm_strike).abs().argsort()[:1]]
         
@@ -320,11 +309,10 @@ def calculate_skew(calls_df, puts_df, current_price, at_the_money_strike=None):
 def calculate_term_structure(ticker, expiries):
     """Calculate IV across expiries to determine contango/backwardation."""
     term_data = []
-    for exp in expiries[:5]:  # Limit to 5 expiries
+    for exp in expiries[:5]:
         try:
             calls, puts = get_cached_option_chain(ticker, exp)
             if calls is not None and not calls.empty:
-                # Get average ATM IV
                 atm_idx = (calls['strike'] - st.session_state.price).abs().argsort()[:3]
                 avg_iv = calls.iloc[atm_idx]['impliedVolatility'].mean()
                 days = (pd.to_datetime(exp).date() - datetime.now().date()).days
@@ -333,7 +321,6 @@ def calculate_term_structure(ticker, expiries):
             continue
     
     if len(term_data) >= 2:
-        # Check slope
         if term_data[0]['iv'] < term_data[-1]['iv']:
             structure = "🟢 Contango (Upward sloping - Normal)"
         else:
@@ -351,11 +338,9 @@ def calculate_max_pain(calls_df, puts_df, strikes):
             call_pain = 0
             put_pain = 0
             
-            # Call pain: max(0, stock_price - strike) * OI (simplified)
             call_matches = calls_df[calls_df['strike'] == strike]
             if not call_matches.empty:
                 call_oi = call_matches['openInterest'].iloc[0] if 'openInterest' in call_matches.columns else 0
-                # Simplified calculation
                 call_pain = call_oi * max(0, st.session_state.price - strike) / 100
             
             put_matches = puts_df[puts_df['strike'] == strike]
@@ -1013,7 +998,7 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Tabs (10 tabs - NEW Quant Analytics Tab)
+    # Tabs (10 tabs)
     t_dashboard, t_quant, t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
         "📊 Dashboard", "🔬 Quant Analytics", "📋 Global Recs", "🛡️ Conservative", 
         "⚡ Aggressive", "🎰 Speculative", "📊 Technical", "🤖 AI Research", 
@@ -1021,7 +1006,7 @@ if st.session_state.price and st.session_state.expiries:
     ])
 
     # ========================
-    # DASHBOARD TAB (Enhanced with Sentiment)
+    # DASHBOARD TAB
     # ========================
     with t_dashboard:
         st.header("📊 Trading Dashboard")
@@ -1062,7 +1047,6 @@ if st.session_state.price and st.session_state.expiries:
                     st.metric("Next Earnings", earnings_date.strftime('%Y-%m-%d'), delta=f"In {days_to_earnings} days")
             else:
                 st.metric("Next Earnings", "Not available", delta="Check manually")
-
 
         st.divider()
 
@@ -1158,13 +1142,12 @@ if st.session_state.price and st.session_state.expiries:
                 st.rerun()
 
     # ========================
-    # QUANT ANALYTICS TAB (UPDATED with Put/Call Ratio & Beta)
+    # QUANT ANALYTICS TAB
     # ========================
     with t_quant:
         st.header("🔬 Quantitative Analytics")
         st.markdown("Advanced metrics for professional traders")
         
-        # Get current option chain for analysis
         current_expiry = st.session_state.expiries[0] if st.session_state.expiries else None
         
         if current_expiry:
@@ -1172,7 +1155,6 @@ if st.session_state.price and st.session_state.expiries:
             
             if calls_df is not None and not calls_df.empty:
                 
-                # ========== NEW: PUT/CALL RATIO SECTION ==========
                 st.subheader("📊 Sentiment Indicators")
                 
                 pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
@@ -1188,14 +1170,12 @@ if st.session_state.price and st.session_state.expiries:
                     else:
                         st.info("Put/Call ratio unavailable - insufficient volume data")
                 
-                # ========== NEW: BETA SECTION ==========
                 with col_pc2:
                     beta, beta_interpretation = calculate_beta(st.session_state.current_ticker)
                     st.metric("Beta (vs SPY)", f"{beta:.2f}", delta=beta_interpretation[:20])
                     st.caption(beta_interpretation)
                 
                 with col_pc3:
-                    # Volatility comparison
                     hv = calculate_hv(st.session_state.hist_data)
                     atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
                     current_iv = calls_df.iloc[atm_idx]['impliedVolatility'].iloc[0] * 100 if not calls_df.empty else 0
@@ -1204,10 +1184,8 @@ if st.session_state.price and st.session_state.expiries:
                 
                 st.divider()
                 
-                # ========== EXISTING: DYNAMIC TARGET CALCULATION ==========
                 st.subheader("🎯 Dynamic Target Calculator (50% in 5 Days)")
                 
-                # Find ATM option
                 atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
                 selected_strike = calls_df.iloc[atm_idx]['strike'].values[0]
                 selected_row = calls_df[calls_df['strike'] == selected_strike].iloc[0]
@@ -1228,7 +1206,6 @@ if st.session_state.price and st.session_state.expiries:
                     st.metric("Required Move %", f"{((target_stock - S)/S)*100:.1f}%")
                     st.caption(f"Delta: {d:.3f} | Gamma: {g:.4f}")
                 
-                # ========== EXISTING: IV/HV SPREAD ==========
                 st.divider()
                 st.subheader("📊 Volatility Analysis")
                 
@@ -1243,7 +1220,6 @@ if st.session_state.price and st.session_state.expiries:
                 with col_v3:
                     st.metric("IV - HV Spread", f"{spread:.1f}%", delta=spread_status)
                 
-                # ========== EXISTING: SKEW ANALYSIS ==========
                 st.divider()
                 st.subheader("📐 Skew Analysis")
                 
@@ -1251,7 +1227,6 @@ if st.session_state.price and st.session_state.expiries:
                 st.metric("Put/Call Volatility Skew", f"{skew:.1f}%", delta=skew_status)
                 st.caption("Positive skew = Calls expensive (Bullish) | Negative skew = Puts expensive (Bearish)")
                 
-                # ========== EXISTING: TERM STRUCTURE ==========
                 st.divider()
                 st.subheader("📈 Term Structure (IV by Expiry)")
                 
@@ -1264,7 +1239,6 @@ if st.session_state.price and st.session_state.expiries:
                 else:
                     st.info("Insufficient data for term structure")
                 
-                # ========== EXISTING: MAX PAIN ==========
                 st.divider()
                 st.subheader("💀 Max Pain Analysis")
                 
@@ -1552,7 +1526,6 @@ if st.session_state.price and st.session_state.expiries:
             with col_a3:
                 st.metric("Historical Vol (20d)", f"{hv_val:.1f}%")
             
-            # PHASE 2: Add IV/HV spread if we have current IV
             try:
                 atm_idx = (chain['strike'] - S).abs().argsort()[:1]
                 current_iv = chain.iloc[atm_idx]['impliedVolatility'].iloc[0] if not chain.empty else None
@@ -1611,7 +1584,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB (FULLY PRESERVED from v4)
+    # PORTFOLIO TAB (FULLY PRESERVED with NameError FIX)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -1765,14 +1738,12 @@ if st.session_state.price and st.session_state.expiries:
                         current_iv = 0.35
                     
                     sentiment_adj = st.session_state.current_sentiment.get('risk_adjustment', 0) if st.session_state.current_sentiment else 0
-                    # Calculate base risk score
                     base_risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv, sentiment_adj)
-                    # Get beta and adjust
-                    beta, _ = calculate_beta(ticker)
+                    beta, _ = calculate_beta(pos['ticker'])
                     risk_score, beta_factor = calculate_beta_adjusted_risk(base_risk_score * 100, beta)
                     positions_with_risk.append((risk_score, idx, row_idx, pos))
                 except:
-                    positions_with_risk.append((0.5, idx, row_idx, pos))
+                    positions_with_risk.append((50.0, idx, row_idx, pos))
             
             positions_with_risk.sort(key=lambda x: x[0], reverse=True)
             
@@ -1787,17 +1758,25 @@ if st.session_state.price and st.session_state.expiries:
                 
                 option_price, current_iv = get_current_option_price(ticker, expiry_date_str, strike)
                 
+                # Initialize default values to prevent NameError
+                risk_score_display = risk_score
+                beta_factor_display = 1.0
+                days_left = 0
+                pnl = 0
+                pnl_pct = 0
+                tech_score_pos = 1
+                ema_status = "neutral"
+                cts = 50
+                ev = 0
+                delta_calc = 0.5
+                touch_prob = 0.5
+                rec_icon_full = "🔵 HOLD"
+                rec_reason = "Data unavailable"
+                
                 if option_price and option_price > 0:
                     days_left = max((pd.to_datetime(expiry_date_str).date() - datetime.now().date()).days, 0)
                     pnl = (option_price - entry_price) * contracts * 100
                     pnl_pct = ((option_price - entry_price) / entry_price) * 100
-                    
-                    if risk_score > 0.7:
-                        risk_indicator = "🔴 HIGH"
-                    elif risk_score > 0.4:
-                        risk_indicator = "🟡 MEDIUM"
-                    else:
-                        risk_indicator = "🟢 LOW"
                     
                     try:
                         stock = yf.Ticker(ticker)
@@ -1828,97 +1807,113 @@ if st.session_state.price and st.session_state.expiries:
                         option_price, entry_price, target, stop, days_left, delta_calc, 0, current_iv,
                         cts, ev, tech_score_pos, ema_status, "stable", 0, touch_prob, 50
                     )
+                else:
+                    days_left = 0
+                    pnl = 0
+                    pnl_pct = 0
+                    tech_score_pos = 1
+                    ema_status = "neutral"
+                    cts = 50
+                    ev = 0
+                    delta_calc = 0.5
+                    touch_prob = 0.5
+                    rec_icon_full = "🔵 HOLD"
+                    rec_reason = "Data unavailable"
+                
+                if risk_score_display > 70:
+                    risk_indicator = "🔴 HIGH"
+                elif risk_score_display > 40:
+                    risk_indicator = "🟡 MEDIUM"
+                else:
+                    risk_indicator = "🟢 LOW"
+                
+                rec_icon = rec_icon_full.split()[0]
+                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price if option_price else 0:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                
+                with st.expander(summary):
+                    st.markdown("### 📊 Position Summary")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Current Option Price", f"${option_price if option_price else 0:.2f}")
+                        pnl_color = "inverse" if pnl < 0 else "normal"
+                        st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
+                        st.metric("Risk Score", f"{risk_score_display:.1f}/100", help=f"Beta-adjusted: {beta_factor_display:.1f}x")
+                    with col2:
+                        st.metric("Days Left", f"{days_left}")
+                        st.metric("Delta", f"{delta_calc:.3f}")
+                    with col3:
+                        st.metric("Entry Price (Avg)", f"${entry_price:.2f}")
+                        st.metric("Contracts", contracts)
                     
-                    rec_icon = rec_icon_full.split()[0]
-                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                    st.markdown("---")
+                    st.markdown("### 💡 Recommendation")
+                    st.info(f"**{rec_icon_full}**")
+                    st.caption(rec_reason)
                     
-                    with st.expander(summary):
-                        st.markdown("### 📊 Position Summary")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Current Option Price", f"${option_price:.2f}")
-                            pnl_color = "inverse" if pnl < 0 else "normal"
-                            st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
-                            st.metric("Risk Score", f"{risk_score:.1f}/100", help=f"Beta-adjusted: {beta_factor:.1f}x")
-                        with col2:
-                            st.metric("Days Left", f"{days_left}")
-                            st.metric("Delta", f"{delta_calc:.3f}")
-                        with col3:
-                            st.metric("Entry Price (Avg)", f"${entry_price:.2f}")
-                            st.metric("Contracts", contracts)
-                        
-                        st.markdown("---")
-                        st.markdown("### 💡 Recommendation")
-                        st.info(f"**{rec_icon_full}**")
-                        st.caption(rec_reason)
-                        
-                        st.markdown("---")
-                        st.markdown("### 📊 Quant Analytics")
-                        q1, q2, q3 = st.columns(3)
-                        with q1:
-                            st.metric("Expected Value (EV)", f"${ev:.2f}")
-                            st.metric("Composite Score", f"{cts}/100")
-                            st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
-                        with q2:
-                            st.metric("IV", f"{current_iv*100:.1f}%")
-                        with q3:
-                            st.metric("Technical Score", f"{tech_score_pos}/3")
-                        
-                        st.markdown("---")
-                        st.markdown("### 🎯 Targets")
-                        col_t1, col_t2 = st.columns(2)
-                        with col_t1:
-                            st.metric("🛑 Stop Loss", f"${stop:.2f}")
-                            if option_price > stop:
-                                st.caption(f"✅ ${option_price - stop:.2f} above stop")
+                    st.markdown("---")
+                    st.markdown("### 📊 Quant Analytics")
+                    q1, q2, q3 = st.columns(3)
+                    with q1:
+                        st.metric("Expected Value (EV)", f"${ev:.2f}")
+                        st.metric("Composite Score", f"{cts}/100")
+                        st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
+                    with q2:
+                        st.metric("IV", f"{current_iv*100:.1f}%" if current_iv else "N/A")
+                    with q3:
+                        st.metric("Technical Score", f"{tech_score_pos}/3")
+                    
+                    st.markdown("---")
+                    st.markdown("### 🎯 Targets")
+                    col_t1, col_t2 = st.columns(2)
+                    with col_t1:
+                        st.metric("🛑 Stop Loss", f"${stop:.2f}")
+                        if option_price and option_price > stop:
+                            st.caption(f"✅ ${option_price - stop:.2f} above stop")
+                        else:
+                            st.caption(f"⚠️ ${stop - (option_price if option_price else 0):.2f} below stop")
+                    with col_t2:
+                        st.metric("🎯 Target", f"${target:.2f}")
+                        if option_price and option_price < target:
+                            st.caption(f"📈 Need +${target - option_price:.2f} to target")
+                            st.progress(option_price / target if option_price else 0)
+                        else:
+                            st.caption("✅ Target reached")
+                            st.progress(1.0)
+                    
+                    st.markdown("---")
+                    st.markdown("### ⚙️ Position Management")
+                    
+                    col_m1, col_m2 = st.columns(2)
+                    
+                    with col_m1:
+                        st.markdown("**➕ Add More Contracts**")
+                        add_qty = st.number_input("Quantity to add:", min_value=1, step=1, key=f"add_qty_{idx}")
+                        add_price = st.number_input("Purchase price:", min_value=0.01, step=0.05, format="%.2f", 
+                                                    value=option_price if option_price else 0.01, key=f"add_price_{idx}")
+                        if st.button("Add More", key=f"add_btn_{idx}"):
+                            success = update_position_after_add(row_idx, add_qty, add_price)
+                            if success:
+                                st.success(f"Added {add_qty} contracts at ${add_price:.2f}!")
+                                st.rerun()
                             else:
-                                st.caption(f"⚠️ ${stop - option_price:.2f} below stop")
-                        with col_t2:
-                            st.metric("🎯 Target", f"${target:.2f}")
-                            if option_price < target:
-                                st.caption(f"📈 Need +${target - option_price:.2f} to target")
-                                st.progress(option_price / target)
+                                st.error("Failed to add. Check inputs.")
+                    
+                    with col_m2:
+                        st.markdown("**💰 Sell Contracts**")
+                        sell_qty = st.number_input("Quantity to sell:", min_value=1, max_value=contracts, step=1, 
+                                                   key=f"sell_qty_{idx}")
+                        sell_price = st.number_input("Sale price:", min_value=0.01, step=0.05, format="%.2f", 
+                                                     value=option_price if option_price else 0.01, key=f"sell_price_{idx}")
+                        if st.button("Sell", key=f"sell_btn_{idx}"):
+                            if sell_qty > contracts:
+                                st.error(f"Cannot sell more than {contracts} contracts.")
                             else:
-                                st.caption("✅ Target reached")
-                                st.progress(1.0)
-                        
-                        st.markdown("---")
-                        st.markdown("### ⚙️ Position Management")
-                        
-                        col_m1, col_m2 = st.columns(2)
-                        
-                        with col_m1:
-                            st.markdown("**➕ Add More Contracts**")
-                            add_qty = st.number_input("Quantity to add:", min_value=1, step=1, key=f"add_qty_{idx}")
-                            add_price = st.number_input("Purchase price:", min_value=0.01, step=0.05, format="%.2f", 
-                                                        value=option_price, key=f"add_price_{idx}")
-                            if st.button("Add More", key=f"add_btn_{idx}"):
-                                success = update_position_after_add(row_idx, add_qty, add_price)
+                                success = update_position_after_sell(row_idx, sell_qty, sell_price)
                                 if success:
-                                    st.success(f"Added {add_qty} contracts at ${add_price:.2f}!")
+                                    st.success(f"Sold {sell_qty} contracts at ${sell_price:.2f}!")
                                     st.rerun()
                                 else:
-                                    st.error("Failed to add. Check inputs.")
-                        
-                        with col_m2:
-                            st.markdown("**💰 Sell Contracts**")
-                            sell_qty = st.number_input("Quantity to sell:", min_value=1, max_value=contracts, step=1, 
-                                                       key=f"sell_qty_{idx}")
-                            sell_price = st.number_input("Sale price:", min_value=0.01, step=0.05, format="%.2f", 
-                                                         value=option_price, key=f"sell_price_{idx}")
-                            if st.button("Sell", key=f"sell_btn_{idx}"):
-                                if sell_qty > contracts:
-                                    st.error(f"Cannot sell more than {contracts} contracts.")
-                                else:
-                                    success = update_position_after_sell(row_idx, sell_qty, sell_price)
-                                    if success:
-                                        st.success(f"Sold {sell_qty} contracts at ${sell_price:.2f}!")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to sell.")
-                else:
-                    with st.expander(f"⚠️ {ticker} ${strike:.2f} Call | Data unavailable"):
-                        st.warning(f"Option price data not available")
+                                    st.error("Failed to sell.")
         else:
             st.info(f"No active positions for {selected_trader}.")
         
@@ -2021,7 +2016,7 @@ if st.session_state.price and st.session_state.expiries:
                             st.error("❌ Failed to save. Check Google Sheets connection.")
 
     # ========================
-    # STRATEGY GUIDE (FULLY PRESERVED)
+    # STRATEGY GUIDE
     # ========================
     with t_edu:
         st.header("📖 Complete Strategy Guide & Indicator Dictionary")
