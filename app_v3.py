@@ -1069,6 +1069,7 @@ with st.sidebar:
         st.rerun()
 
 # --- DATA FETCHING & GLOBAL SCANS ---
+# --- DATA FETCHING & GLOBAL SCANS ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
     st.session_state.ai_brief = "" 
@@ -1092,23 +1093,38 @@ if fetch_btn:
             st.session_state.stock_name = st.session_name
             
             stock_obj = yf.Ticker(ticker_input)
+            # Get ALL expiries (NO filtering)
             all_expiries = list(stock_obj.options)
+            st.session_state.expiries = all_expiries
             
-            # Apply expiry range filter based on user selection (Phase 5)
+            # Calculate recommended expiry based on strategy timeframe (for guidance only)
             today = datetime.now().date()
+            recommended_expiry = None
+            target_days = 60  # default Conservative
+            
             if st.session_state.expiry_range == "60+ DTE (Conservative)":
-                st.session_state.expiries = [exp for exp in all_expiries if (pd.to_datetime(exp).date() - today).days >= 60]
+                target_days = 60
             elif st.session_state.expiry_range == "30-45 DTE (Aggressive)":
-                st.session_state.expiries = [exp for exp in all_expiries if 30 <= (pd.to_datetime(exp).date() - today).days <= 45]
+                target_days = 37  # midpoint
             else:  # "15-30 DTE (Speculative)"
-                st.session_state.expiries = [exp for exp in all_expiries if 15 <= (pd.to_datetime(exp).date() - today).days <= 30]
+                target_days = 22  # midpoint
             
-            if not st.session_state.expiries:
-                st.warning(f"No expiries found in {st.session_state.expiry_range} range. Using all available expiries.")
-                st.session_state.expiries = all_expiries
+            # Find expiry closest to target days
+            closest_expiry = None
+            closest_diff = float('inf')
+            for exp in all_expiries:
+                days = (pd.to_datetime(exp).date() - today).days
+                diff = abs(days - target_days)
+                if diff < closest_diff:
+                    closest_diff = diff
+                    closest_expiry = exp
             
-            if st.session_state.expiries:
-                st.session_state.last_selected_expiry = st.session_state.expiries[0]
+            st.session_state.recommended_expiry = closest_expiry
+            st.session_state.recommended_expiry_days = (pd.to_datetime(closest_expiry).date() - today).days if closest_expiry else 0
+            
+            # Set default selected expiry to the recommended one
+            if closest_expiry:
+                st.session_state.last_selected_expiry = closest_expiry
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
@@ -1130,7 +1146,7 @@ if fetch_btn:
                 st.session_state.tech_score += 1
                 st.session_state.verdict_reasons.append("Price is above 20-day baseline.")
 
-            # valid_global_expiries now uses filtered expiries
+            # valid_global_expiries uses ALL expiries (no filtering)
             valid_global_expiries = st.session_state.expiries
             
             cons_candidates = []
@@ -1154,18 +1170,17 @@ if fetch_btn:
                             d, g, t, v = calculate_greeks(st.session_state.price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
                             p_t = calculate_p_touch(st.session_state.price, row['strike'], t_yrs, row['impliedVolatility'])
                             
-                            # Calculate enhanced EV with skew penalty (Phase 5)
+                            # Calculate enhanced EV with skew penalty
                             ev_val = (p_t * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_t) * (mid_p * (stop_loss_pct / 100)))
                             
-                            # Apply skew penalty if puts_df is available
                             try:
                                 if puts_df is not None and not puts_df.empty:
                                     skew_val, _ = calculate_skew(calls_df, puts_df, st.session_state.price, row['strike'])
-                                    ev_val = apply_skew_penalty(ev_val, skew_val / 100)  # Convert from percentage
+                                    ev_val = apply_skew_penalty(ev_val, skew_val / 100)
                             except:
                                 pass
                             
-                            # Calculate enhanced CTS with Gamma/Theta ratio (Phase 5)
+                            # Calculate enhanced CTS with Gamma/Theta ratio
                             gt_ratio = calculate_gamma_theta_ratio(g, t)
                             cts = calculate_enhanced_cts(d, p_t, gt_ratio, st.session_state.tech_score)
                             
