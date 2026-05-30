@@ -1052,10 +1052,20 @@ if fetch_btn:
             df_tech_init = hist.copy()
             curr_init, prev_init = get_technicals(df_tech_init)
             
-            tech_score = 0
-            if curr_init['ema8'] > curr_init['ema20']: tech_score += 1
-            if curr_init['hist'] > prev_init['hist']: tech_score += 1
-            if st.session_state.price > sma20_val: tech_score += 1
+            # Store in session state instead of local variable
+            st.session_state.tech_score = 0
+            if curr_init['ema8'] > curr_init['ema20']: st.session_state.tech_score += 1
+            if curr_init['hist'] > prev_init['hist']: st.session_state.tech_score += 1
+            if st.session_state.price > sma20_val: st.session_state.tech_score += 1
+            
+            # Store verdict reasons as well
+            st.session_state.verdict_reasons = []
+            if curr_init['ema8'] > curr_init['ema20']:
+                st.session_state.verdict_reasons.append("Short-term momentum (8 EMA) is leading.")
+            if curr_init['hist'] > prev_init['hist']:
+                st.session_state.verdict_reasons.append("MACD histogram is rising.")
+            if st.session_state.price > sma20_val:
+                st.session_state.verdict_reasons.append("Price is above 20-day baseline.")
 
             today = datetime.now().date()
             valid_global_expiries = [exp for exp in st.session_state.expiries if (pd.to_datetime(exp).date() - today).days >= 60]
@@ -1714,10 +1724,10 @@ if st.session_state.price and st.session_state.expiries:
                     except:
                         st.caption("Historical chart data unavailable")
 
-    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative", tech_score)
-    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", tech_score)
-    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", tech_score)
-
+    process_tier_strategy(t_cons, 0.50, 0.60, "Conservative", st.session_state.get('tech_score', 0))
+    process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", st.session_state.get('tech_score', 0))
+    process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", st.session_state.get('tech_score', 0))
+    
     with t_tech:
         if not st.session_state.hist_data.empty:
             st.subheader("Momentum & Volatility Health")
@@ -1773,18 +1783,20 @@ if st.session_state.price and st.session_state.expiries:
             st.line_chart(st.session_state.hist_data[['Close', 'ema8', 'ema20', 'upper', 'lower']])
 
             st.subheader("🏁 Final Technical Verdict")
-            if tech_score == 3:
+            tech_score_val = st.session_state.get('tech_score', 0)
+            if tech_score_val == 3:
                 st.success("🎯 **VERDICT: INVEST.** All indicators are aligned.")
-            elif tech_score == 2:
+            elif tech_score_val == 2:
                 st.warning("⚖️ **VERDICT: CAUTION.** Mixed signals.")
             else:
                 st.error("🛑 **VERDICT: STAY AWAY.** Bearish structure.")
             
             with st.expander("View Verdict Logic"):
-                if 'verdict_reasons' in locals() and verdict_reasons:
-                    for reason in verdict_reasons:
+                verdict_reasons_val = st.session_state.get('verdict_reasons', [])
+                if verdict_reasons_val:
+                    for reason in verdict_reasons_val:
                         st.write(f"- {reason}")
-                if tech_score < 2:
+                if tech_score_val < 2:
                     st.write("- Multiple indicators show declining strength or bearish crossovers.")
         else:
             st.warning("⚠️ Technical analysis stream offline.")
