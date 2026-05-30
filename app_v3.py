@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG MUST BE FIRST ---
-st.set_page_config(page_title="Analyst Pro Options Suite v5", layout="wide")
+st.set_page_config(page_title="Analyst Pro Options Suite v6", layout="wide")
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
@@ -37,7 +37,7 @@ class SimpleCache:
             'expires': datetime.now() + timedelta(seconds=self.ttl)
         }
 
-# --- CACHING FOR YFINANCE DATA (Prevents Rate Limits) ---
+# --- CACHING FOR YFINANCE DATA ---
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_option_chain(ticker, expiry):
     try:
@@ -79,8 +79,10 @@ def get_cached_current_price(ticker):
     except Exception as e:
         return None
 
-# --- NEW: ADVANCED TECHNICAL INDICATORS (Phase 1) ---
-# --- NEW: ADVANCED TECHNICAL INDICATORS (Phase 1) ---
+# ========================
+# PHASE 2: ADVANCED QUANT FUNCTIONS
+# ========================
+
 def calculate_atr(df, period=14):
     """Calculate Average True Range for volatility measurement."""
     try:
@@ -96,11 +98,11 @@ def calculate_atr(df, period=14):
             atr_pct = (last_atr / last_close) * 100
             return round(last_atr, 2), round(atr_pct, 1)
         return 0.0, 0.0
-    except Exception as e:
+    except Exception:
         return 0.0, 0.0
 
 def calculate_rsi(df, period=14):
-    """Calculate Relative Strength Index for overbought/oversold detection."""
+    """Calculate Relative Strength Index."""
     try:
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(window=period).mean()
@@ -111,7 +113,7 @@ def calculate_rsi(df, period=14):
         if pd.notna(last_rsi):
             return round(last_rsi, 1)
         return 50.0
-    except Exception as e:
+    except Exception:
         return 50.0
 
 def calculate_hv(df, period=20):
@@ -123,11 +125,173 @@ def calculate_hv(df, period=20):
         if pd.notna(last_hv):
             return round(last_hv * 100, 1)
         return 0.0
-    except Exception as e:
+    except Exception:
         return 0.0
 
+def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, days=5, target_gain_pct=0.50):
+    """
+    Calculate the stock price needed for target% option gain in N days.
+    Uses quadratic solution: 0.5*Gamma*(ΔS)² + Delta*(ΔS) + Theta*days - target_gain = 0
+    """
+    try:
+        target_option = option_price * (1 + target_gain_pct)  # 50% gain on option
+        target_gain = target_option - option_price
+        
+        a = 0.5 * gamma
+        b = delta
+        c = (theta * days) - target_gain
+        
+        if a != 0:
+            discriminant = b**2 - 4*a*c
+            if discriminant >= 0:
+                delta_S = (-b + np.sqrt(discriminant)) / (2*a)
+                target_stock = stock_price + delta_S
+            else:
+                # Fallback: use delta-only approximation
+                target_stock = stock_price + (target_gain / delta) if delta > 0 else stock_price * 1.05
+        else:
+            # Linear approximation (gamma near zero)
+            target_stock = stock_price + (target_gain / delta) if delta > 0 else stock_price * 1.05
+        
+        # Calculate stop loss (25% option loss)
+        stop_option = option_price * 0.75
+        stop_gain = stop_option - option_price
+        c_stop = (theta * days) - stop_gain
+        
+        if a != 0:
+            disc_stop = b**2 - 4*a*c_stop
+            if disc_stop >= 0:
+                delta_S_stop = (-b + np.sqrt(disc_stop)) / (2*a)
+                stop_stock = stock_price + delta_S_stop
+            else:
+                stop_stock = stock_price * 0.97
+        else:
+            stop_stock = stock_price + (stop_gain / delta) if delta > 0 else stock_price * 0.97
+        
+        return max(target_stock, stock_price * 1.01), max(stop_stock, stock_price * 0.90)
+    except Exception:
+        return stock_price * 1.05, stock_price * 0.95
+
+def calculate_iv_hv_spread(current_iv, hv):
+    """Calculate spread between Implied Volatility and Historical Volatility."""
+    if current_iv is None or hv == 0:
+        return 0, "N/A"
+    spread = (current_iv * 100) - hv
+    if spread > 10:
+        status = "🔴 Expensive (IV > HV)"
+    elif spread < -10:
+        status = "🟢 Cheap (IV < HV)"
+    else:
+        status = "🟡 Fair (IV ≈ HV)"
+    return round(spread, 1), status
+
+def calculate_skew(calls_df, puts_df, current_price, at_the_money_strike=None):
+    """Calculate put/call implied volatility skew."""
+    try:
+        if at_the_money_strike is None:
+            atm_strike = current_price
+        else:
+            atm_strike = at_the_money_strike
+        
+        # Find ATM options
+        call_atm = calls_df.iloc[(calls_df['strike'] - atm_strike).abs().argsort()[:1]]
+        put_atm = puts_df.iloc[(puts_df['strike'] - atm_strike).abs().argsort()[:1]]
+        
+        call_iv = call_atm['impliedVolatility'].iloc[0] if not call_atm.empty else 0
+        put_iv = put_atm['impliedVolatility'].iloc[0] if not put_atm.empty else 0
+        
+        skew = put_iv - call_iv if put_iv and call_iv else 0
+        
+        if skew > 0.05:
+            status = "⚠️ Negative Skew (Puts expensive - Bearish bias)"
+        elif skew < -0.05:
+            status = "✅ Positive Skew (Calls expensive - Bullish bias)"
+        else:
+            status = "⚪ Neutral Skew"
+        
+        return round(skew * 100, 1), status
+    except Exception:
+        return 0, "N/A"
+
+def calculate_term_structure(ticker, expiries):
+    """Calculate IV across expiries to determine contango/backwardation."""
+    term_data = []
+    for exp in expiries[:5]:  # Limit to 5 expiries
+        try:
+            calls, puts = get_cached_option_chain(ticker, exp)
+            if calls is not None and not calls.empty:
+                # Get average ATM IV
+                atm_idx = (calls['strike'] - st.session_state.price).abs().argsort()[:3]
+                avg_iv = calls.iloc[atm_idx]['impliedVolatility'].mean()
+                days = (pd.to_datetime(exp).date() - datetime.now().date()).days
+                term_data.append({'expiry': exp, 'days': days, 'iv': avg_iv})
+        except:
+            continue
+    
+    if len(term_data) >= 2:
+        # Check slope
+        if term_data[0]['iv'] < term_data[-1]['iv']:
+            structure = "🟢 Contango (Upward sloping - Normal)"
+        else:
+            structure = "🔴 Backwardation (Downward sloping - Stress)"
+        return term_data, structure
+    return term_data, "Insufficient data"
+
+def calculate_max_pain(calls_df, puts_df, strikes):
+    """Calculate Max Pain - the strike where option writers profit most."""
+    try:
+        max_pain = None
+        min_pain_value = float('inf')
+        
+        for strike in strikes:
+            call_pain = 0
+            put_pain = 0
+            
+            # Call pain: max(0, stock_price - strike) * OI (simplified)
+            call_matches = calls_df[calls_df['strike'] == strike]
+            if not call_matches.empty:
+                call_oi = call_matches['openInterest'].iloc[0] if 'openInterest' in call_matches.columns else 0
+                # Simplified calculation
+                call_pain = call_oi * max(0, st.session_state.price - strike) / 100
+            
+            put_matches = puts_df[puts_df['strike'] == strike]
+            if not put_matches.empty:
+                put_oi = put_matches['openInterest'].iloc[0] if 'openInterest' in put_matches.columns else 0
+                put_pain = put_oi * max(0, strike - st.session_state.price) / 100
+            
+            total_pain = call_pain + put_pain
+            if total_pain < min_pain_value:
+                min_pain_value = total_pain
+                max_pain = strike
+        
+        return max_pain
+    except Exception:
+        return None
+
+def get_vix():
+    """Get current VIX value."""
+    try:
+        vix = yf.Ticker("^VIX")
+        hist = vix.history(period="1d")
+        if not hist.empty:
+            return round(hist['Close'].iloc[-1], 1)
+        return 15.0
+    except:
+        return 15.0
+
+def get_market_regime(vix):
+    """Determine market regime based on VIX."""
+    if vix < 12:
+        return "🟢 LOW VOL", "Options cheap, low probability of large moves"
+    elif vix < 20:
+        return "🟢 OPTIMAL", "Normal volatility regime. 60 DTE calls favorable."
+    elif vix < 25:
+        return "🟡 ELEVATED", "Elevated volatility. Options expensive but higher gamma potential"
+    else:
+        return "🔴 HIGH VOL", "High volatility. Options overpriced. Caution with long calls"
+
 def get_earnings_date(ticker):
-    """Get next earnings date from yfinance."""
+    """Get next earnings date."""
     try:
         stock = yf.Ticker(ticker)
         calendar = stock.calendar
@@ -141,29 +305,7 @@ def get_earnings_date(ticker):
     except:
         return None
 
-def get_vix():
-    """Get current VIX value for market regime."""
-    try:
-        vix = yf.Ticker("^VIX")
-        hist = vix.history(period="1d")
-        if not hist.empty:
-            return round(hist['Close'].iloc[-1], 1)
-        return 15.0
-    except:
-        return 15.0
-
-def get_market_regime(vix):
-    """Determine market regime based on VIX."""
-    if vix < 12:
-        return "🟢 LOW VOL", "Options cheap, but low probability of large moves. Favorable for selling premium."
-    elif vix < 20:
-        return "🟢 OPTIMAL", "Normal volatility regime. 60 DTE calls favorable."
-    elif vix < 25:
-        return "🟡 ELEVATED", "Elevated volatility. Options expensive but higher gamma potential."
-    else:
-        return "🔴 HIGH VOL", "High volatility. Options overpriced. Caution with long calls."
-
-# --- GOOGLE SHEETS CONNECTION (for Portfolio) ---
+# --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
 def get_google_sheet():
     try:
@@ -377,23 +519,15 @@ def calculate_portfolio_summary(positions_data):
     return total_investment, total_unrealized_pnl, total_realized_pnl
 
 def calculate_risk_score(pos, current_price, current_delta, days_left, current_iv, sentiment_adjustment=0):
-    """Calculate risk score for a position (higher score = higher risk)."""
-    # Position Size Risk (25% weight - reduced from 30%)
     entry_price = float(pos['entry_price'])
     contracts = int(pos['contracts'])
     position_value = contracts * entry_price * 100
     size_score = min(position_value / 50000, 1.0)
     
-    # Delta Risk (20% weight - reduced from 25%)
     delta_score = 1 - min(max(current_delta, 0), 1)
-    
-    # Time Risk (15% weight - reduced from 20%)
     time_score = 1 - min(days_left / 365, 1)
-    
-    # IV Risk (15% weight - unchanged)
     iv_score = min(current_iv * 2, 1) if current_iv else 0.5
     
-    # Moneyness Risk (10% weight - unchanged)
     try:
         current_stock = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
         strike = float(pos['strike'])
@@ -405,17 +539,10 @@ def calculate_risk_score(pos, current_price, current_delta, days_left, current_i
     except:
         moneyness_score = 0.5
     
-    # NEW: Sentiment Risk (15% weight)
-    sentiment_score_normalized = max(-1, min(1, -sentiment_adjustment / 50))  # Convert adjustment to -1 to 1
-    sentiment_risk = (1 - sentiment_score_normalized) / 2  # 0 = bearish (high risk), 1 = bullish (low risk)
+    sentiment_score_normalized = max(-1, min(1, -sentiment_adjustment / 50))
+    sentiment_risk = (1 - sentiment_score_normalized) / 2
     
-    # Recalculate weights with sentiment
-    risk_score = (size_score * 0.20 + 
-                  delta_score * 0.20 + 
-                  time_score * 0.15 + 
-                  iv_score * 0.15 + 
-                  moneyness_score * 0.10 +
-                  sentiment_risk * 0.20)
+    risk_score = (size_score * 0.20 + delta_score * 0.20 + time_score * 0.15 + iv_score * 0.15 + moneyness_score * 0.10 + sentiment_risk * 0.20)
     
     return risk_score
 
@@ -462,40 +589,7 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
                 return None
     return None
 
-# --- CORE MATH & OPTIONS QUANT ENGINES ---
-def calculate_greeks(S, K, T, r, sigma, type="call"):
-    if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    delta = norm.cdf(d1) if type == "call" else norm.cdf(d1) - 1
-    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
-    vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
-    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
-
-def calculate_p_touch(S, K, T, sigma):
-    if T <= 0 or sigma <= 0 or S <= 0: return 0.0
-    d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    p_itm = norm.cdf(d1) if S < K else 1.0 - norm.cdf(d1)
-    p_touch = min(p_itm * 2.0, 0.99)
-    return round(p_touch, 3)
-
-# --- TECHNICAL ANALYSIS ENGINE ---
-def get_technicals(df):
-    df['ema8'] = df['Close'].ewm(span=8, adjust=False).mean()
-    df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = ema12 - ema26
-    df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['hist'] = df['macd'] - df['signal']
-    df['sma20'] = df['Close'].rolling(window=20).mean()
-    df['std20'] = df['Close'].rolling(window=20).std()
-    df['upper'] = df['sma20'] + (df['std20'] * 2)
-    df['lower'] = df['sma20'] - (df['std20'] * 2)
-    return df.iloc[-1], df.iloc[-2]
-
-# --- FETCH NEWS FROM FINNHUB ---
+# --- AI RESEARCH WITH SENTIMENT (Phase 3) ---
 def fetch_news_finnhub(ticker):
     api_key = st.secrets.get("FINNHUB_API_KEY")
     if not api_key:
@@ -530,7 +624,6 @@ def fetch_news_finnhub(ticker):
         return None
 
 def get_ai_research(ticker):
-    """Enhanced AI research with JSON mode for sentiment scoring."""
     groq_api_key = st.secrets.get("GROQ_API_KEY")
     cache_key = f"news_sentiment_{ticker}"
     cached_response = st.session_state.ai_cache.get(cache_key)
@@ -541,7 +634,6 @@ def get_ai_research(ticker):
     if not news_articles:
         return f"ℹ️ No recent news found for {ticker}"
     
-    # Get current price for context
     current_price = get_cached_current_price(ticker)
     price_context = f" at ${current_price:.2f}" if current_price else ""
     
@@ -552,7 +644,6 @@ def get_ai_research(ticker):
         for i, item in enumerate(news_articles)
     ])
     
-    # Enhanced prompt requesting JSON output
     prompt = f"""
     You are a quantitative financial analyst. Analyze the following news articles for stock {ticker}{price_context}.
     
@@ -570,12 +661,6 @@ def get_ai_research(ticker):
         "summary": "brief 1-sentence summary",
         "risk_adjustment": integer between -20 and 20
     }}
-    
-    Guidelines:
-    - sentiment_score: +0.7 to +1.0 = strongly bullish, +0.3 to +0.7 = mildly bullish, 
-                       -0.3 to +0.3 = neutral, -0.7 to -0.3 = mildly bearish, -1.0 to -0.7 = strongly bearish
-    - catalyst: Only include if an event is mentioned within next 30 days
-    - risk_adjustment: How much to adjust risk score (-20 = lower risk, +20 = higher risk)
     """
     
     try:
@@ -583,26 +668,13 @@ def get_ai_research(ticker):
         response_text = call_groq_with_retry(client, prompt)
         
         if response_text is None:
-            # Fallback to simple summary
             result = f"### 📰 Recent News for {ticker}\n\n"
             for i, item in enumerate(news_articles[:5]):
                 result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']}\n\n"
-            result += "\n*💡 AI sentiment analysis temporarily unavailable*"
-            sentiment_data = {
-                "sentiment_score": 0.0,
-                "sentiment_label": "Neutral",
-                "catalyst": None,
-                "catalyst_date": None,
-                "catalyst_impact": None,
-                "key_themes": [],
-                "summary": "AI analysis unavailable",
-                "risk_adjustment": 0
-            }
+            sentiment_data = {"sentiment_score": 0.0, "sentiment_label": "Neutral", "risk_adjustment": 0}
         else:
-            # Parse JSON response
             import json as json_lib
             try:
-                # Extract JSON from response (in case Groq adds extra text)
                 json_start = response_text.find('{')
                 json_end = response_text.rfind('}') + 1
                 if json_start != -1 and json_end > json_start:
@@ -611,27 +683,13 @@ def get_ai_research(ticker):
                 else:
                     raise ValueError("No JSON found")
             except:
-                # Fallback if JSON parsing fails
-                sentiment_data = {
-                    "sentiment_score": 0.0,
-                    "sentiment_label": "Neutral",
-                    "catalyst": None,
-                    "catalyst_date": None,
-                    "catalyst_impact": None,
-                    "key_themes": [],
-                    "summary": response_text[:200],
-                    "risk_adjustment": 0
-                }
+                sentiment_data = {"sentiment_score": 0.0, "sentiment_label": "Neutral", "risk_adjustment": 0}
             
-            # Store sentiment in session state for other tabs
-            st.session_state.current_sentiment = sentiment_data
-            
-            # Build formatted result
-            sentiment_color = "🟢" if sentiment_data['sentiment_score'] > 0.3 else ("🔴" if sentiment_data['sentiment_score'] < -0.3 else "⚪")
+            sentiment_color = "🟢" if sentiment_data.get('sentiment_score', 0) > 0.3 else ("🔴" if sentiment_data.get('sentiment_score', 0) < -0.3 else "⚪")
             result = f"""
 ### 🤖 AI Sentiment Analysis for {ticker}
 
-{sentiment_color} **Sentiment Score:** {sentiment_data['sentiment_score']:.2f} ({sentiment_data['sentiment_label']})
+{sentiment_color} **Sentiment Score:** {sentiment_data.get('sentiment_score', 0):.2f} ({sentiment_data.get('sentiment_label', 'Neutral')})
 
 **Key Themes:**
 """
@@ -641,7 +699,6 @@ def get_ai_research(ticker):
             if sentiment_data.get('catalyst'):
                 result += f"""
 **📅 Catalyst Detected:** {sentiment_data['catalyst']}
-   - Date: {sentiment_data.get('catalyst_date', 'TBD')}
    - Impact: {sentiment_data.get('catalyst_impact', 'Medium')}
 """
             
@@ -654,26 +711,48 @@ def get_ai_research(ticker):
             for i, item in enumerate(news_articles[:5]):
                 result += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']} | 🕐 {item['datetime']}\n\n"
         
-        # Cache the result
         st.session_state.ai_cache.set(cache_key, result)
-        
-        # Store sentiment in session state for dashboard
-        if 'current_sentiment' not in st.session_state:
-            st.session_state.current_sentiment = sentiment_data if 'sentiment_data' in dir() else {
-                "sentiment_score": 0.0,
-                "sentiment_label": "Neutral",
-                "risk_adjustment": 0
-            }
+        st.session_state.current_sentiment = sentiment_data
         
         return result
-        
     except Exception as e:
         fallback = f"### 📰 Recent News for {ticker}\n\n"
         for i, item in enumerate(news_articles[:5]):
             fallback += f"**{i+1}. {item['title']}**  \n📌 {item['publisher']} | 🕐 {item['datetime']}\n\n"
         return fallback
 
-# --- HYBRID RECOMMENDATION ENGINE (for Portfolio) ---
+# --- CORE MATH & OPTIONS QUANT ENGINES ---
+def calculate_greeks(S, K, T, r, sigma, type="call"):
+    if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    delta = norm.cdf(d1) if type == "call" else norm.cdf(d1) - 1
+    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+    vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
+    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
+
+def calculate_p_touch(S, K, T, sigma):
+    if T <= 0 or sigma <= 0 or S <= 0: return 0.0
+    d1 = (np.log(S / K) + (0.05 + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    p_itm = norm.cdf(d1) if S < K else 1.0 - norm.cdf(d1)
+    p_touch = min(p_itm * 2.0, 0.99)
+    return round(p_touch, 3)
+
+def get_technicals(df):
+    df['ema8'] = df['Close'].ewm(span=8, adjust=False).mean()
+    df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['hist'] = df['macd'] - df['signal']
+    df['sma20'] = df['Close'].rolling(window=20).mean()
+    df['std20'] = df['Close'].rolling(window=20).std()
+    df['upper'] = df['sma20'] + (df['std20'] * 2)
+    df['lower'] = df['sma20'] - (df['std20'] * 2)
+    return df.iloc[-1], df.iloc[-2]
+
 def get_hybrid_recommendation(option_price, entry_price, target, stop_loss, 
                                days_left, current_delta, current_theta, current_iv,
                                cts, ev, tech_score, ema_status, macd_trend, macd_days,
@@ -710,7 +789,8 @@ state_keys = {
     'stock_name': None, 'expiries': [], 'current_ticker': "", 
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
-    'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30
+    'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30,
+    'current_sentiment': None
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -829,20 +909,19 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Tabs (9 tabs - DASHBOARD is NEW)
-    t_dashboard, t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
-        "📊 Dashboard", "📋 Global Recs", "🛡️ Conservative", "⚡ Aggressive", 
-        "🎰 Speculative", "📊 Technical", "🤖 AI Research", 
+    # Tabs (10 tabs - NEW Quant Analytics Tab)
+    t_dashboard, t_quant, t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
+        "📊 Dashboard", "🔬 Quant Analytics", "📋 Global Recs", "🛡️ Conservative", 
+        "⚡ Aggressive", "🎰 Speculative", "📊 Technical", "🤖 AI Research", 
         "📂 Portfolio", "📖 Strategy Guide"
     ])
 
-        # ========================
+    # ========================
     # DASHBOARD TAB (Enhanced with Sentiment)
     # ========================
     with t_dashboard:
         st.header("📊 Trading Dashboard")
         
-        # Get market regime
         vix = get_vix()
         regime_text, regime_desc = get_market_regime(vix)
         
@@ -852,7 +931,6 @@ if st.session_state.price and st.session_state.expiries:
             st.caption(regime_desc)
         
         with col_m2:
-            # Get ATR and RSI for current ticker
             hist_data = st.session_state.hist_data
             try:
                 atr_val, atr_pct = calculate_atr(hist_data)
@@ -868,7 +946,6 @@ if st.session_state.price and st.session_state.expiries:
             st.metric("RSI (14d)", f"{rsi_val:.1f}", delta=rsi_status)
         
         with col_m3:
-            # Earnings proximity
             earnings_date = get_earnings_date(st.session_state.current_ticker)
             if earnings_date:
                 days_to_earnings = (earnings_date - datetime.now().date()).days
@@ -884,12 +961,10 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # NEW: Sentiment Section
+        # Sentiment Section
         st.subheader("🤖 AI Market Sentiment")
-        
-        # Get or compute sentiment
         sentiment_data = getattr(st.session_state, 'current_sentiment', None)
-        if sentiment_data and sentiment_data.get('sentiment_score') != 0:
+        if sentiment_data and sentiment_data.get('sentiment_score', 0) != 0:
             sentiment_score = sentiment_data.get('sentiment_score', 0)
             sentiment_label = sentiment_data.get('sentiment_label', 'Neutral')
             
@@ -904,22 +979,18 @@ if st.session_state.price and st.session_state.expiries:
                 else:
                     st.info(f"**Sentiment: {sentiment_label}**")
                     st.metric("Sentiment Score", f"{sentiment_score:.2f}", delta="Neutral")
-            
             with col_s2:
                 risk_adj = sentiment_data.get('risk_adjustment', 0)
                 if risk_adj > 0:
                     st.warning(f"Risk Adjustment: +{risk_adj}")
-                    st.caption("Sentiment increases risk")
                 elif risk_adj < 0:
                     st.info(f"Risk Adjustment: {risk_adj}")
-                    st.caption("Sentiment decreases risk")
                 else:
                     st.caption("No risk adjustment")
-            
             with col_s3:
                 catalyst = sentiment_data.get('catalyst')
                 if catalyst:
-                    st.info(f"📅 **Catalyst:** {catalyst[:50]}...")
+                    st.info(f"📅 **Catalyst:** {catalyst[:50]}..." if len(catalyst) > 50 else f"📅 **Catalyst:** {catalyst}")
                 else:
                     st.caption("No immediate catalysts detected")
         else:
@@ -971,6 +1042,101 @@ if st.session_state.price and st.session_state.expiries:
             if st.button("🗑️ Clear Cache", use_container_width=True):
                 st.cache_data.clear()
                 st.rerun()
+
+    # ========================
+    # NEW: QUANT ANALYTICS TAB (Phase 2)
+    # ========================
+    with t_quant:
+        st.header("🔬 Quantitative Analytics")
+        st.markdown("Advanced metrics for professional traders")
+        
+        # Get current option chain for analysis
+        current_expiry = st.session_state.expiries[0] if st.session_state.expiries else None
+        
+        if current_expiry:
+            calls_df, puts_df = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
+            
+            if calls_df is not None and not calls_df.empty:
+                # 1. DYNAMIC TARGET CALCULATION
+                st.subheader("🎯 Dynamic Target Calculator (50% in 5 Days)")
+                
+                # Find ATM option
+                atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
+                selected_strike = calls_df.iloc[atm_idx]['strike'].values[0]
+                selected_row = calls_df[calls_df['strike'] == selected_strike].iloc[0]
+                
+                option_price = (selected_row['bid'] + selected_row['ask']) / 2 if selected_row['bid'] > 0 else selected_row['lastPrice']
+                d, g, theta, v = calculate_greeks(S, selected_strike, T_years if 'T_years' in dir() else 0.16, 0.05, selected_row['impliedVolatility'])
+                
+                target_stock, stop_stock = calculate_dynamic_targets(S, option_price, d, g, theta, days=5, target_gain_pct=0.50)
+                
+                col_d1, col_d2, col_d3 = st.columns(3)
+                with col_d1:
+                    st.metric("Current Stock Price", f"${S:.2f}")
+                    st.metric("ATM Strike", f"${selected_strike:.2f}")
+                with col_d2:
+                    st.metric("Target Stock Price (50% gain)", f"${target_stock:.2f}", delta=f"${target_stock - S:.2f}")
+                    st.metric("Stop Stock Price (25% loss)", f"${stop_stock:.2f}", delta=f"${stop_stock - S:.2f}")
+                with col_d3:
+                    st.metric("Required Move %", f"{((target_stock - S)/S)*100:.1f}%")
+                    st.caption(f"Option Delta: {d:.3f} | Gamma: {g:.4f}")
+                
+                # 2. IV/HV SPREAD
+                st.divider()
+                st.subheader("📊 Volatility Analysis")
+                
+                hv = calculate_hv(st.session_state.hist_data)
+                current_iv = selected_row['impliedVolatility'] * 100
+                spread, spread_status = calculate_iv_hv_spread(selected_row['impliedVolatility'], hv)
+                
+                col_v1, col_v2, col_v3 = st.columns(3)
+                with col_v1:
+                    st.metric("Implied Volatility (IV)", f"{current_iv:.1f}%")
+                with col_v2:
+                    st.metric("Historical Volatility (HV)", f"{hv:.1f}%")
+                with col_v3:
+                    st.metric("IV - HV Spread", f"{spread:.1f}%", delta=spread_status)
+                
+                # 3. SKEW ANALYSIS
+                st.divider()
+                st.subheader("📐 Skew Analysis")
+                
+                skew, skew_status = calculate_skew(calls_df, puts_df, S, selected_strike)
+                st.metric("Put/Call Volatility Skew", f"{skew:.1f}%", delta=skew_status)
+                st.caption("Positive skew = Calls expensive (Bullish) | Negative skew = Puts expensive (Bearish)")
+                
+                # 4. TERM STRUCTURE
+                st.divider()
+                st.subheader("📈 Term Structure (IV by Expiry)")
+                
+                term_data, term_structure = calculate_term_structure(st.session_state.current_ticker, st.session_state.expiries)
+                if term_data:
+                    st.metric("Term Structure", term_structure)
+                    term_df = pd.DataFrame(term_data)
+                    st.line_chart(term_df.set_index('days')['iv'])
+                    st.caption("Upward slope (Contango) = Normal | Downward slope (Backwardation) = Market stress")
+                else:
+                    st.info("Insufficient data for term structure")
+                
+                # 5. MAX PAIN
+                st.divider()
+                st.subheader("💀 Max Pain Analysis")
+                
+                strikes = sorted(calls_df['strike'].unique())
+                max_pain = calculate_max_pain(calls_df, puts_df, strikes)
+                if max_pain:
+                    st.metric("Max Pain Strike", f"${max_pain:.2f}")
+                    if max_pain < S:
+                        st.caption(f"Max pain is ${S - max_pain:.2f} below current price - Potential gravitational pull down")
+                    else:
+                        st.caption(f"Max pain is ${max_pain - S:.2f} above current price - Potential gravitational pull up")
+                else:
+                    st.info("Max pain calculation unavailable")
+                
+            else:
+                st.warning("Option chain data unavailable for quant analysis")
+        else:
+            st.info("No expiries available. Analyze a ticker first.")
 
     with t_summary:
         st.subheader("🏁 Automated Quantitative Trading Dashboard")
@@ -1222,22 +1388,33 @@ if st.session_state.price and st.session_state.expiries:
         if not st.session_state.hist_data.empty:
             st.subheader("Momentum & Volatility Health")
             
-            # NEW: ATR and RSI display
-            atr_val, atr_pct = calculate_atr(st.session_state.hist_data)
-            rsi_val = calculate_rsi(st.session_state.hist_data)
-            hv_val = calculate_hv(st.session_state.hist_data)
+            try:
+                atr_val, atr_pct = calculate_atr(st.session_state.hist_data)
+                rsi_val = calculate_rsi(st.session_state.hist_data)
+                hv_val = calculate_hv(st.session_state.hist_data)
+            except:
+                atr_val, atr_pct = 0.0, 0.0
+                rsi_val = 50.0
+                hv_val = 0.0
             
             col_a1, col_a2, col_a3 = st.columns(3)
             with col_a1:
                 st.metric("ATR (14d)", f"${atr_val:.2f}", delta=f"{atr_pct:.1f}% of price")
-                st.caption("Average True Range - Daily volatility measure")
             with col_a2:
                 rsi_status = "Overbought" if rsi_val > 70 else ("Oversold" if rsi_val < 30 else "Neutral")
                 st.metric("RSI (14d)", f"{rsi_val:.1f}", delta=rsi_status)
-                st.caption("Relative Strength Index - Momentum")
             with col_a3:
                 st.metric("Historical Vol (20d)", f"{hv_val:.1f}%")
-                st.caption("Realized volatility - Compare with IV")
+            
+            # PHASE 2: Add IV/HV spread if we have current IV
+            try:
+                atm_idx = (chain['strike'] - S).abs().argsort()[:1]
+                current_iv = chain.iloc[atm_idx]['impliedVolatility'].iloc[0] if not chain.empty else None
+                if current_iv:
+                    spread, spread_status = calculate_iv_hv_spread(current_iv, hv_val)
+                    st.metric("IV/HV Spread", f"{spread:.1f}%", delta=spread_status)
+            except:
+                pass
             
             st.divider()
             
@@ -1441,7 +1618,8 @@ if st.session_state.price and st.session_state.expiries:
                         current_delta = 0.5
                         current_iv = 0.35
                     
-                    risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv)
+                    sentiment_adj = st.session_state.current_sentiment.get('risk_adjustment', 0) if st.session_state.current_sentiment else 0
+                    risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv, sentiment_adj)
                     positions_with_risk.append((risk_score, idx, row_idx, pos))
                 except:
                     positions_with_risk.append((0.5, idx, row_idx, pos))
@@ -1693,7 +1871,7 @@ if st.session_state.price and st.session_state.expiries:
                             st.error("❌ Failed to save. Check Google Sheets connection.")
 
     # ========================
-    # STRATEGY GUIDE (FULLY PRESERVED from v4)
+    # STRATEGY GUIDE (FULLY PRESERVED)
     # ========================
     with t_edu:
         st.header("📖 Complete Strategy Guide & Indicator Dictionary")
@@ -1722,14 +1900,15 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        st.subheader("📊 NEW: Advanced Technical Indicators (Phase 1)")
+        st.subheader("📊 Advanced Quantitative Indicators (Phase 2)")
         st.markdown("""
         | Indicator | What It Measures | How To Use |
         |-----------|------------------|------------|
-        | **ATR (Average True Range)** | Daily volatility magnitude | Target should be 2-3x ATR for realistic 5-day moves |
-        | **RSI (Relative Strength Index)** | Overbought/oversold conditions | RSI > 70 = overbought (avoid entry); RSI < 30 = oversold (potential bounce) |
-        | **Historical Volatility (HV)** | Actual past volatility | Compare with IV: IV > HV = options expensive; IV < HV = options cheap |
-        | **VIX (Fear Index)** | Market-wide volatility regime | VIX < 15 = low vol (small moves); VIX > 25 = high vol (large moves possible) |
+        | **Dynamic Target** | Stock price needed for 50% option gain in 5 days | Uses Gamma/Theta math - more accurate than fixed targets |
+        | **IV/HV Spread** | Implied vs Historical Volatility | IV > HV = expensive options; IV < HV = cheap options |
+        | **Put/Call Skew** | Difference in put vs call IV | Positive skew = bullish bias; Negative skew = bearish bias |
+        | **Term Structure** | IV across different expiries | Contango (upward) = normal; Backwardation (downward) = market stress |
+        | **Max Pain** | Strike where option writers profit most | Acts as gravitational price target |
         """)
         
         st.divider()
@@ -1774,7 +1953,7 @@ if st.session_state.price and st.session_state.expiries:
         
         st.subheader("✅ Complete Trade Decision Framework")
         st.markdown("""
-        **Step 1: Market Regime (NEW)**
+        **Step 1: Market Regime**
         - [ ] VIX between 12-25 (optimal for calls)
         - [ ] Not within 7 days of earnings
         
@@ -1787,18 +1966,23 @@ if st.session_state.price and st.session_state.expiries:
         - [ ] Delta matches your risk profile
         - [ ] Days to expiry > 60
         
-        **Step 4: Technical Confirmation (NEW)**
+        **Step 4: Technical Confirmation**
         - [ ] RSI between 30-70 (not overbought/oversold)
         - [ ] ATR sufficient for target (target move > 2x ATR)
         - [ ] 8 EMA > 20 EMA (bullish)
         
-        **Step 5: Math Confirmation**
+        **Step 5: Quant Confirmation (NEW)**
+        - [ ] IV/HV spread not excessive (>10% expensive)
+        - [ ] Skew aligns with directional bias
+        - [ ] Term structure in contango (normal)
+        
+        **Step 6: Math Confirmation**
         - [ ] Composite Score > 55
         - [ ] Expected Value > 0.25
         
-        **Step 6: Trade Management Plan**
-        - [ ] Take profit at 40% above entry
-        - [ ] Stop loss at 30% below entry
+        **Step 7: Trade Management Plan**
+        - [ ] Dynamic target calculated
+        - [ ] Stop loss at 25-30% option loss
         - [ ] Exit by cutoff date
         """)
         
