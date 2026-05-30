@@ -80,31 +80,51 @@ def get_cached_current_price(ticker):
         return None
 
 # --- NEW: ADVANCED TECHNICAL INDICATORS (Phase 1) ---
+# --- NEW: ADVANCED TECHNICAL INDICATORS (Phase 1) ---
 def calculate_atr(df, period=14):
     """Calculate Average True Range for volatility measurement."""
-    high, low, close = df['High'], df['Low'], df['Close']
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean().iloc[-1]
-    atr_pct = (atr / close.iloc[-1]) * 100
-    return round(atr, 2), round(atr_pct, 1)
+    try:
+        high, low, close = df['High'], df['Low'], df['Close']
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        last_atr = atr.iloc[-1]
+        last_close = close.iloc[-1]
+        if pd.notna(last_atr) and pd.notna(last_close) and last_close > 0:
+            atr_pct = (last_atr / last_close) * 100
+            return round(last_atr, 2), round(atr_pct, 1)
+        return 0.0, 0.0
+    except Exception as e:
+        return 0.0, 0.0
 
 def calculate_rsi(df, period=14):
     """Calculate Relative Strength Index for overbought/oversold detection."""
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return round(rsi.iloc[-1], 1)
+    try:
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        last_rsi = rsi.iloc[-1]
+        if pd.notna(last_rsi):
+            return round(last_rsi, 1)
+        return 50.0
+    except Exception as e:
+        return 50.0
 
 def calculate_hv(df, period=20):
     """Calculate Historical Volatility (Realized Vol)."""
-    returns = np.log(df['Close'] / df['Close'].shift(1))
-    hv = returns.std() * np.sqrt(252)
-    return round(hv.iloc[-1] * 100, 1)
+    try:
+        returns = np.log(df['Close'] / df['Close'].shift(1))
+        hv = returns.rolling(window=period).std() * np.sqrt(252)
+        last_hv = hv.iloc[-1]
+        if pd.notna(last_hv):
+            return round(last_hv * 100, 1)
+        return 0.0
+    except Exception as e:
+        return 0.0
 
 def get_earnings_date(ticker):
     """Get next earnings date from yfinance."""
@@ -712,8 +732,14 @@ if st.session_state.price and st.session_state.expiries:
         with col_m2:
             # Get ATR and RSI for current ticker
             hist_data = st.session_state.hist_data
-            atr_val, atr_pct = calculate_atr(hist_data)
-            rsi_val = calculate_rsi(hist_data)
+            try:
+                atr_val, atr_pct = calculate_atr(hist_data)
+            except:
+                atr_val, atr_pct = 0.0, 0.0
+            try:
+                rsi_val = calculate_rsi(hist_data)
+            except:
+                rsi_val = 50.0
             
             st.metric("ATR (14d)", f"${atr_val:.2f}", delta=f"{atr_pct:.1f}% of price")
             rsi_status = "🟢 Neutral" if 30 <= rsi_val <= 70 else ("🔴 Overbought" if rsi_val > 70 else "🟠 Oversold")
