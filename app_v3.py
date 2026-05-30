@@ -812,7 +812,8 @@ def calculate_portfolio_summary(positions_data):
         entry_price = float(pos['entry_price'])
         total_investment += contracts * entry_price * 100
         
-        option_price, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
+        # FIXED: get_current_option_price returns 4 values (mid, iv, gamma, theta)
+        option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
         if option_price:
             unrealized = (option_price - entry_price) * contracts * 100
             total_unrealized_pnl += unrealized
