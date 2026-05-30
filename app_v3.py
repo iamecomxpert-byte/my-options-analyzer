@@ -812,7 +812,7 @@ def calculate_portfolio_summary(positions_data):
         entry_price = float(pos['entry_price'])
         total_investment += contracts * entry_price * 100
         
-        # FIXED: get_current_option_price returns 4 values (mid, iv, gamma, theta)
+        # get_current_option_price returns 4 values (mid, iv, gamma, theta)
         option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
         if option_price:
             unrealized = (option_price - entry_price) * contracts * 100
@@ -1122,11 +1122,11 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 Workspace Adjuster")
     
-    # Only show the dropdown if we have expiries AND data has been fetched successfully
-    if st.session_state.get('data_fetched', False) and st.session_state.expiries:
+    # Show workspace adjuster ONLY when expiries are loaded
+    if st.session_state.expiries and len(st.session_state.expiries) > 0:
         # Find index of current selection
         current_index = 0
-        if st.session_state.last_selected_expiry in st.session_state.expiries:
+        if st.session_state.last_selected_expiry and st.session_state.last_selected_expiry in st.session_state.expiries:
             current_index = st.session_state.expiries.index(st.session_state.last_selected_expiry)
         
         expiry = st.selectbox(
@@ -1139,16 +1139,21 @@ with st.sidebar:
         if expiry != st.session_state.get('last_selected_expiry'):
             st.session_state.last_selected_expiry = expiry
             st.rerun()
-    elif fetch_btn:
-        # User just clicked analyze - data is loading
-        st.info("📊 Loading options data... Please wait for tabs to update.")
     else:
-        # Initial state - nothing fetched yet
-        st.info("👈 Enter a ticker and click 'Analyze Options Structure' to begin")
+        # No expiries loaded yet
+        if fetch_btn:
+            # Just clicked analyze - show loading message
+            st.info("⏳ Loading expiries... Please wait a moment.")
+        else:
+            # Initial state
+            st.info("👈 Enter a ticker and click 'Analyze Options Structure'")
     
     st.divider()
     if st.button("🗑️ Clear Cache", help="Clear cached data if you're seeing stale information"):
         st.cache_data.clear()
+        for key in ['expiries', 'last_selected_expiry', 'price', 'hist_data', 'stock_name', 'trend', 'pct_change', 'tech_score', 'verdict_reasons', 'global_conservative', 'global_aggressive', 'global_speculative', 'data_fetched']:
+            if key in st.session_state:
+                del st.session_state[key]
         st.success("Cache cleared! Refresh the page to reload data.")
         st.rerun()
 
@@ -1160,6 +1165,7 @@ if fetch_btn:
     st.session_state.global_aggressive = None
     st.session_state.global_speculative = None
     st.session_state.last_selected_expiry = None
+    st.session_state.data_fetched = True
     
     try:
         hist = get_cached_stock_history(ticker_input, "100d")
@@ -1173,15 +1179,13 @@ if fetch_btn:
             
             stock_info = get_cached_stock_info(ticker_input)
             st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
-            st.session_state.stock_name = st.session_name  # FIXED typo
+            st.session_state.stock_name = st.session_name
             
             stock_obj = yf.Ticker(ticker_input)
             all_expiries = list(stock_obj.options)
             st.session_state.expiries = all_expiries
-            st.success(f"✅ Loaded {len(all_expiries)} expiries")  # Add this to confirm
-            st.session_state.data_fetched = True
             
-            # Set default expiry to closest to 90 days
+            # Set default expiry to closest to 90 days (Conservative strategy)
             today = datetime.now().date()
             closest_to_90 = None
             closest_diff_90 = float('inf')
@@ -1216,10 +1220,6 @@ if fetch_btn:
                 st.session_state.verdict_reasons.append("Price is above 20-day baseline.")
 
             # Get Global Recommendations (independent of workspace adjuster)
-            # Conservative: 60+ DTE (closest to 90 days)
-            # Aggressive: 30-45 DTE
-            # Speculative: 15-30 DTE
-            
             cons_contract = get_best_contract_for_strategy(
                 ticker_input, profit_target_pct, stop_loss_pct, st.session_state.price,
                 min_dte=60, max_dte=365, delta_min=0.50, delta_max=0.60
