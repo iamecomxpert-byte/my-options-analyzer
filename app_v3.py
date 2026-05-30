@@ -1780,11 +1780,18 @@ if st.session_state.price and st.session_state.expiries:
             else:
                 st.error("🛑 **VERDICT: STAY AWAY.** Bearish structure.")
             
+            # Initialize verdict_reasons list if it doesn't exist
+            if 'verdict_reasons' not in dir():
+                verdict_reasons = []
+            
             with st.expander("View Verdict Logic"):
-                for reason in verdict_reasons:
-                    st.write(f"- {reason}")
+                if verdict_reasons:
+                    for reason in verdict_reasons:
+                        st.write(f"- {reason}")
                 if tech_score < 2:
                     st.write("- Multiple indicators show declining strength or bearish crossovers.")
+        else:
+            st.warning("⚠️ Technical analysis stream offline.")
 
     with t_ai:
         if st.button("🔄 Refresh AI Analysis", use_container_width=True):
