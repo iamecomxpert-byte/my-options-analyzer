@@ -80,7 +80,7 @@ def get_cached_current_price(ticker):
         return None
 
 # ========================
-# PHASE 2: ADVANCED QUANT FUNCTIONS
+# ADVANCED QUANT FUNCTIONS
 # ========================
 
 def calculate_atr(df, period=14):
@@ -163,7 +163,7 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
         return stock_price * 1.05, stock_price * 0.95
 
 # ========================
-# PHASE 4: PUT/CALL RATIO & BETA ADJUSTMENT
+# PUT/CALL RATIO & BETA ADJUSTMENT
 # ========================
 
 def calculate_put_call_ratio(ticker, expiry):
@@ -369,7 +369,7 @@ def get_earnings_date(ticker):
         return None
 
 # ========================
-# PHASE 5: NEW HELPER FUNCTIONS (Gamma/Theta Ratio, Skew Penalty)
+# PHASE 5: HELPER FUNCTIONS
 # ========================
 
 def calculate_gamma_theta_ratio(gamma, theta):
@@ -377,14 +377,13 @@ def calculate_gamma_theta_ratio(gamma, theta):
     if theta is None or theta == 0:
         return 0
     ratio = abs(gamma / theta) if theta != 0 else 0
-    # Cap at 3.0 for normalization, anything above 2.0 is excellent
     return min(ratio, 3.0)
 
 def apply_skew_penalty(ev, skew):
     """Apply penalty to EV based on put/call skew."""
-    if skew < -0.05:  # Negative skew (puts expensive) - bearish signal
+    if skew < -0.05:
         return ev * 0.85
-    elif skew > 0.05:  # Positive skew (calls expensive) - bullish signal
+    elif skew > 0.05:
         return ev * 1.05
     return ev
 
@@ -393,7 +392,6 @@ def calculate_enhanced_cts(delta, p_touch, gamma_theta_ratio, tech_score):
     Enhanced Composite Score with Gamma/Theta ratio.
     Weights: Delta 30%, Touch Prob 30%, Gamma/Theta 20%, Technical 20%
     """
-    # Normalize gamma_theta_ratio to 0-1 scale (2.0+ = 1.0)
     normalized_gt = min(gamma_theta_ratio / 2.0, 1.0)
     
     cts = (delta * 0.30 + 
@@ -402,6 +400,80 @@ def calculate_enhanced_cts(delta, p_touch, gamma_theta_ratio, tech_score):
            (tech_score / 3.0) * 0.20)
     
     return int(cts * 100)
+
+def get_best_contract_for_strategy(ticker, profit_target_pct, stop_loss_pct, current_price, min_dte, max_dte, delta_min, delta_max):
+    """Get the best contract for a strategy within a DTE range."""
+    try:
+        stock_obj = yf.Ticker(ticker)
+        all_expiries = list(stock_obj.options)
+        
+        if not all_expiries:
+            return None
+        
+        today = datetime.now().date()
+        
+        # Filter expiries by DTE range
+        valid_expiries = []
+        for exp in all_expiries:
+            days = (pd.to_datetime(exp).date() - today).days
+            if min_dte <= days <= max_dte:
+                valid_expiries.append((exp, days))
+        
+        if not valid_expiries:
+            return None
+        
+        best_contract = None
+        best_ev = -float('inf')
+        
+        for exp_date, days_exp in valid_expiries:
+            calls_df, puts_df = get_cached_option_chain(ticker, exp_date)
+            if calls_df is None or calls_df.empty:
+                continue
+            
+            t_yrs = days_exp / 365
+            
+            for _, row in calls_df.iterrows():
+                mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                if mid_p <= 0 or row['impliedVolatility'] <= 0:
+                    continue
+                
+                d, g, t, v = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
+                
+                if delta_min <= d <= delta_max:
+                    p_touch = calculate_p_touch(current_price, row['strike'], t_yrs, row['impliedVolatility'])
+                    ev_val = (p_touch * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_touch) * (mid_p * (stop_loss_pct / 100)))
+                    
+                    # Apply skew penalty
+                    try:
+                        if puts_df is not None and not puts_df.empty:
+                            skew_val, _ = calculate_skew(calls_df, puts_df, current_price, row['strike'])
+                            ev_val = apply_skew_penalty(ev_val, skew_val / 100)
+                    except:
+                        pass
+                    
+                    # Calculate CTS with Gamma/Theta
+                    gt_ratio = calculate_gamma_theta_ratio(g, t)
+                    cts = calculate_enhanced_cts(d, p_touch, gt_ratio, 2)  # Default tech_score = 2
+                    
+                    if ev_val > best_ev:
+                        best_ev = ev_val
+                        best_contract = {
+                            'strike': row['strike'],
+                            'mid': mid_p,
+                            'expiry': exp_date,
+                            'days': days_exp,
+                            'delta': d,
+                            'ev': ev_val,
+                            'cts': cts,
+                            'iv': row['impliedVolatility'],
+                            'gamma': g,
+                            'theta': t,
+                            'gamma_theta_ratio': gt_ratio
+                        }
+        
+        return best_contract
+    except Exception as e:
+        return None
 
 # --- DASHBOARD HELPER FUNCTIONS ---
 def calculate_strict_verdict(vix, rsi, iv_hv_spread, earnings_days, sentiment_score):
@@ -511,12 +583,11 @@ def get_strategy_for_expiry(ticker, expiry, delta_min, delta_max, profit_target_
             if mid_p <= 0 or row['impliedVolatility'] <= 0:
                 continue
             
-            d, _, _, _ = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
+            d, g, t, v = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
             
             if delta_min <= d <= delta_max:
                 p_touch = calculate_p_touch(current_price, row['strike'], t_yrs, row['impliedVolatility'])
                 ev_val = (p_touch * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_touch) * (mid_p * (stop_loss_pct / 100)))
-                # Use default tech_score = 0.5 for dashboard
                 cts = int(((d * 0.4) + (p_touch * 0.4) + (0.5 * 0.2)) * 100)
                 
                 if ev_val > best_ev:
@@ -529,7 +600,9 @@ def get_strategy_for_expiry(ticker, expiry, delta_min, delta_max, profit_target_
                         'cts': cts,
                         'days': days_to_expiry,
                         'iv': row['impliedVolatility'],
-                        'gamma': row['gamma'] if 'gamma' in row else 0
+                        'gamma': g,
+                        'theta': t,
+                        'gamma_theta_ratio': calculate_gamma_theta_ratio(g, t)
                     }
         
         return best_contract
@@ -1023,7 +1096,7 @@ state_keys = {
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
     'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30,
-    'current_sentiment': None, 'active_tab': 0, 'expiry_range': "60+ DTE (Conservative)"
+    'current_sentiment': None, 'active_tab': 0
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -1037,6 +1110,7 @@ with st.sidebar:
     st.header("🎮 Control Center")
     ticker_input = st.text_input("Ticker:", "SHOP").upper()
     fetch_btn = st.button("🚀 Analyze Options Structure")
+    
     st.divider()
     st.header("🧪 Exit & Hold Adjuster")
     profit_target_pct = st.slider("Target Option Profit Booking (%)", 10, 150, 100, step=5)
@@ -1044,31 +1118,31 @@ with st.sidebar:
     st.session_state.profit_target_pct = profit_target_pct
     st.session_state.stop_loss_pct = stop_loss_pct
     
-    # NEW: Expiry Range Selector (Phase 5)
     st.divider()
-    st.header("📅 Strategy Timeframe")
-    expiry_range_options = ["60+ DTE (Conservative)", "30-45 DTE (Aggressive)", "15-30 DTE (Speculative)"]
-    st.session_state.expiry_range = st.selectbox(
-        "Select Strategy Timeframe:",
-        options=expiry_range_options,
-        index=0,
-        help="Conservative: Slower, higher probability | Aggressive: Faster 50% gains | Speculative: Highest gamma, highest risk"
-    )
+    st.subheader("🔍 Workspace Adjuster")
+    
+    # Show message if no expiries available yet
+    if not st.session_state.expiries:
+        st.info("👈 Click 'Analyze Options Structure' first to load expiries")
+        st.session_state.last_selected_expiry = None
+    else:
+        expiry = st.selectbox(
+            "Select Expiry for Individual Tabs Below:", 
+            st.session_state.expiries,
+            index=st.session_state.expiries.index(st.session_state.last_selected_expiry) if st.session_state.last_selected_expiry in st.session_state.expiries else 0,
+            help="Select any expiry to update the Conservative, Aggressive, and Speculative tabs below"
+        )
+        
+        if st.session_state.expiries and expiry != st.session_state.get('last_selected_expiry'):
+            st.session_state.last_selected_expiry = expiry
+            st.rerun()
     
     st.divider()
     if st.button("🗑️ Clear Cache", help="Clear cached data if you're seeing stale information"):
         st.cache_data.clear()
         st.success("Cache cleared! Refresh the page to reload data.")
         st.rerun()
-    
-    st.divider()
-    st.subheader("🔍 Workspace Adjuster")
-    expiry = st.selectbox("Select Expiry for Individual Tabs Below:", st.session_state.expiries if st.session_state.expiries else ["No data"])
-    if st.session_state.expiries and expiry != st.session_state.get('last_selected_expiry'):
-        st.session_state.last_selected_expiry = expiry
-        st.rerun()
 
-# --- DATA FETCHING & GLOBAL SCANS ---
 # --- DATA FETCHING & GLOBAL SCANS ---
 if fetch_btn:
     st.session_state.current_ticker = ticker_input
@@ -1090,41 +1164,25 @@ if fetch_btn:
             
             stock_info = get_cached_stock_info(ticker_input)
             st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
-            st.session_state.stock_name = st.session_name
+            st.session_state.stock_name = st_session_name
             
             stock_obj = yf.Ticker(ticker_input)
-            # Get ALL expiries (NO filtering)
             all_expiries = list(stock_obj.options)
             st.session_state.expiries = all_expiries
             
-            # Calculate recommended expiry based on strategy timeframe (for guidance only)
+            # Set default expiry to closest to 90 days (Conservative default)
             today = datetime.now().date()
-            recommended_expiry = None
-            target_days = 60  # default Conservative
-            
-            if st.session_state.expiry_range == "60+ DTE (Conservative)":
-                target_days = 60
-            elif st.session_state.expiry_range == "30-45 DTE (Aggressive)":
-                target_days = 37  # midpoint
-            else:  # "15-30 DTE (Speculative)"
-                target_days = 22  # midpoint
-            
-            # Find expiry closest to target days
-            closest_expiry = None
-            closest_diff = float('inf')
+            closest_to_90 = None
+            closest_diff_90 = float('inf')
             for exp in all_expiries:
                 days = (pd.to_datetime(exp).date() - today).days
-                diff = abs(days - target_days)
-                if diff < closest_diff:
-                    closest_diff = diff
-                    closest_expiry = exp
+                diff = abs(days - 90)
+                if diff < closest_diff_90:
+                    closest_diff_90 = diff
+                    closest_to_90 = exp
             
-            st.session_state.recommended_expiry = closest_expiry
-            st.session_state.recommended_expiry_days = (pd.to_datetime(closest_expiry).date() - today).days if closest_expiry else 0
-            
-            # Set default selected expiry to the recommended one
-            if closest_expiry:
-                st.session_state.last_selected_expiry = closest_expiry
+            if closest_to_90:
+                st.session_state.last_selected_expiry = closest_to_90
             
             sma20_val = hist['Close'].rolling(window=20).mean().iloc[-1]
             st.session_state.trend = "Bullish" if st.session_state.price > sma20_val else "Bearish"
@@ -1146,60 +1204,32 @@ if fetch_btn:
                 st.session_state.tech_score += 1
                 st.session_state.verdict_reasons.append("Price is above 20-day baseline.")
 
-            # valid_global_expiries uses ALL expiries (no filtering)
-            valid_global_expiries = st.session_state.expiries
+            # Get Global Recommendations (independent of workspace adjuster)
+            # Conservative: 60+ DTE (closest to 90 days)
+            # Aggressive: 30-45 DTE
+            # Speculative: 15-30 DTE
             
-            cons_candidates = []
-            aggr_candidates = []
-            spec_candidates = []
+            cons_contract = get_best_contract_for_strategy(
+                ticker_input, profit_target_pct, stop_loss_pct, st.session_state.price,
+                min_dte=60, max_dte=365, delta_min=0.50, delta_max=0.60
+            )
             
-            with st.spinner("Processing mathematical matrix across options chain..."):
-                for exp_date in valid_global_expiries[:6]:
-                    try:
-                        calls_df, puts_df = get_cached_option_chain(ticker_input, exp_date)
-                        if calls_df is None:
-                            continue
-                        opt_chain = calls_df
-                        days_exp = (pd.to_datetime(exp_date).date() - today).days
-                        t_yrs = days_exp / 365
-                        
-                        for _, row in opt_chain.iterrows():
-                            mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
-                            if mid_p <= 0 or row['impliedVolatility'] <= 0: continue
-                            
-                            d, g, t, v = calculate_greeks(st.session_state.price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
-                            p_t = calculate_p_touch(st.session_state.price, row['strike'], t_yrs, row['impliedVolatility'])
-                            
-                            # Calculate enhanced EV with skew penalty
-                            ev_val = (p_t * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_t) * (mid_p * (stop_loss_pct / 100)))
-                            
-                            try:
-                                if puts_df is not None and not puts_df.empty:
-                                    skew_val, _ = calculate_skew(calls_df, puts_df, st.session_state.price, row['strike'])
-                                    ev_val = apply_skew_penalty(ev_val, skew_val / 100)
-                            except:
-                                pass
-                            
-                            # Calculate enhanced CTS with Gamma/Theta ratio
-                            gt_ratio = calculate_gamma_theta_ratio(g, t)
-                            cts = calculate_enhanced_cts(d, p_t, gt_ratio, st.session_state.tech_score)
-                            
-                            c_data = {
-                                'strike': row['strike'], 'expiry': exp_date, 'mid': mid_p, 'delta': d, 
-                                'p_touch': p_t, 'ev': ev_val, 'cts': cts, 'days': days_exp, 'iv': row['impliedVolatility'],
-                                'gamma': g, 'theta': t, 'gamma_theta_ratio': gt_ratio
-                            }
-                            
-                            if 0.50 <= d <= 0.60: cons_candidates.append(c_data)
-                            elif 0.40 <= d <= 0.49: aggr_candidates.append(c_data)
-                            elif 0.30 <= d <= 0.39: spec_candidates.append(c_data)
-                    except Exception as e:
-                        st.warning(f"Could not process expiry {exp_date}: {str(e)[:50]}")
-                        continue
+            aggr_contract = get_best_contract_for_strategy(
+                ticker_input, profit_target_pct, stop_loss_pct, st.session_state.price,
+                min_dte=30, max_dte=45, delta_min=0.40, delta_max=0.49
+            )
             
-            if cons_candidates: st.session_state.global_conservative = max(cons_candidates, key=lambda x: x['ev'])
-            if aggr_candidates: st.session_state.global_aggressive = max(aggr_candidates, key=lambda x: x['ev'])
-            if spec_candidates: st.session_state.global_speculative = max(spec_candidates, key=lambda x: x['ev'])
+            spec_contract = get_best_contract_for_strategy(
+                ticker_input, profit_target_pct, stop_loss_pct, st.session_state.price,
+                min_dte=15, max_dte=30, delta_min=0.30, delta_max=0.39
+            )
+            
+            if cons_contract:
+                st.session_state.global_conservative = cons_contract
+            if aggr_contract:
+                st.session_state.global_aggressive = aggr_contract
+            if spec_contract:
+                st.session_state.global_speculative = spec_contract
 
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
@@ -1223,12 +1253,11 @@ if st.session_state.price and st.session_state.expiries:
     ])
 
     # ========================
-    # REDESIGNED DASHBOARD TAB
+    # DASHBOARD TAB
     # ========================
     with t_dashboard:
         st.header("📊 Trading Dashboard")
         
-        # Get all required metrics
         vix = get_vix()
         hist_data = st.session_state.hist_data
         
@@ -1241,7 +1270,6 @@ if st.session_state.price and st.session_state.expiries:
             rsi_val = 50.0
             hv_val = 0.0
         
-        # Get IV/HV spread using the selected expiry from sidebar
         current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
         
         if current_expiry:
@@ -1256,21 +1284,18 @@ if st.session_state.price and st.session_state.expiries:
         
         iv_hv_spread, _ = calculate_iv_hv_spread(current_iv, hv_val)
         
-        # Get earnings info
         earnings_date = get_earnings_date(st.session_state.current_ticker)
         if earnings_date:
             days_to_earnings = (earnings_date - datetime.now().date()).days
         else:
             days_to_earnings = None
         
-        # Get sentiment
         sentiment_data = getattr(st.session_state, 'current_sentiment', None)
         if sentiment_data:
             sentiment_score = sentiment_data.get('sentiment_score', 0)
         else:
             sentiment_score = 0
         
-        # Get skew and beta
         beta, _ = calculate_beta(st.session_state.current_ticker)
         try:
             if current_expiry:
@@ -1284,7 +1309,6 @@ if st.session_state.price and st.session_state.expiries:
         except:
             skew = 0
         
-        # ========== VERDICT SECTION ==========
         st.subheader("🎯 Market Verdict")
         
         strict_verdict, strict_passed, strict_confidence = calculate_strict_verdict(
@@ -1302,24 +1326,21 @@ if st.session_state.price and st.session_state.expiries:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
         
-        # ========== PATH EXPECTATION ==========
         path_icon, path_text = calculate_path_expectation(rsi_val, sentiment_score, atr_pct > 1.5, vix > 20)
         st.info(f"{path_icon} **Path Expectation:** {path_text}")
         
         st.divider()
         
-        # ========== STRATEGY TABLE ==========
         st.subheader("📋 Strategy Recommendations")
         st.caption("💡 Click any row to view detailed analysis in the corresponding strategy tab")
         
-        # Get recommendations for the currently selected expiry
         current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
         
         if current_expiry:
             strategy_configs = [
                 {"name": "🛡️ Conservative", "delta_min": 0.50, "delta_max": 0.60, "tab_index": 3, "tooltip": "Higher probability (50-60%), lower return, slower time to target"},
                 {"name": "⚡ Aggressive", "delta_min": 0.40, "delta_max": 0.49, "tab_index": 4, "tooltip": "Medium probability (40-49%), medium return, balanced risk/reward"},
-                {"name": "🎰 Speculative", "delta_min": 0.30, "delta_max": 0.39, "tab_index": 5, "tooltip": "Lower probability (30-39%), highest return potential, fastest time to target (lottery-like)"}
+                {"name": "🎰 Speculative", "delta_min": 0.30, "delta_max": 0.39, "tab_index": 5, "tooltip": "Lower probability (30-39%), highest return potential, fastest time to target"}
             ]
             
             table_data = []
@@ -1386,7 +1407,6 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # ========== KEY METRICS ROW 1 ==========
         st.subheader("📊 Key Market Metrics")
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
         with col_k1:
@@ -1402,7 +1422,6 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # ========== KEY METRICS ROW 2 ==========
         col_k5, col_k6, col_k7, col_k8 = st.columns(4)
         with col_k5:
             spread_status = "Fair" if -10 <= iv_hv_spread <= 10 else ("Expensive" if iv_hv_spread > 10 else "Cheap")
@@ -1430,7 +1449,6 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        # ========== SENTIMENT SECTION ==========
         st.subheader("🤖 AI Market Sentiment")
         sentiment_data = getattr(st.session_state, 'current_sentiment', None)
         if sentiment_data and sentiment_data.get('sentiment_score', 0) != 0:
@@ -1469,7 +1487,7 @@ if st.session_state.price and st.session_state.expiries:
                 st.rerun()
 
     # ========================
-    # QUANT ANALYTICS TAB (unchanged)
+    # QUANT ANALYTICS TAB
     # ========================
     with t_quant:
         st.header("🔬 Quantitative Analytics")
@@ -1585,29 +1603,36 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.info("No expiries available. Analyze a ticker first.")
 
+    # ========================
+    # GLOBAL RECS TAB (UPDATED with Expiry Column)
+    # ========================
     with t_summary:
         st.subheader("🏁 Automated Quantitative Trading Dashboard")
-        st.markdown("Mathematically optimal contracts with >= 60 days expiry")
+        st.markdown("Mathematically optimal contracts across ALL expiries (independent of sidebar selection)")
         
         sum_data = []
         profiles = [
-            ("🛡️ Conservative", st.session_state.global_conservative, "50-60%"),
-            ("⚡ Aggressive", st.session_state.global_aggressive, "40-49%"),
-            ("🎰 Speculative", st.session_state.global_speculative, "30-39%")
+            ("🛡️ Conservative", st.session_state.global_conservative, "50-60%", "60+ DTE (closest to 90 days)"),
+            ("⚡ Aggressive", st.session_state.global_aggressive, "40-49%", "30-45 DTE"),
+            ("🎰 Speculative", st.session_state.global_speculative, "30-39%", "15-30 DTE")
         ]
         
-        for name, profile, target_d in profiles:
+        for name, profile, target_d, range_desc in profiles:
             if profile:
                 t_exit = profile['mid'] * (1 + profit_target_pct / 100)
                 s_loss = profile['mid'] * (1 - stop_loss_pct / 100)
                 h_days = min(int(profile['days'] * 0.4), 45)
                 h_date = (datetime.now() + timedelta(days=h_days)).strftime('%b %d, %Y')
                 
+                # Format expiry date
+                expiry_display = profile['expiry'] if 'expiry' in profile else 'N/A'
+                
                 sum_data.append({
                     "Strategy": name,
+                    "Optimal Expiry": expiry_display,
+                    "Expiry Range": range_desc,
                     "Target Delta": target_d,
                     "Strike": f"${profile['strike']:.2f} Call",
-                    "Expiry": profile['expiry'],
                     "Entry": f"${profile['mid']:.2f}",
                     "Target": f"${t_exit:.2f}",
                     "Stop": f"${s_loss:.2f}",
@@ -1616,15 +1641,20 @@ if st.session_state.price and st.session_state.expiries:
         
         if sum_data:
             st.dataframe(pd.DataFrame(sum_data), use_container_width=True)
+            st.caption("💡 These recommendations are FIXED and do not change when you select a different expiry in the sidebar.")
         else:
-            st.warning("No contracts met the criteria.")
+            st.warning("No contracts met the criteria. Try a different ticker or adjust your exit parameters.")
 
+    # ========================
+    # CONSERVATIVE / AGGRESSIVE / SPECULATIVE TABS
+    # ========================
+    
     def process_tier_strategy(tab_component, delta_min, delta_max, tier_label, tech_score):
         with tab_component:
-            # Use the expiry from sidebar
+            # Use the expiry from sidebar (Workspace Adjuster)
             current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
             if not current_expiry:
-                st.warning("No expiry selected")
+                st.warning("No expiry selected. Please analyze a ticker first.")
                 return
             
             days_to_expiry = (pd.to_datetime(current_expiry).date() - datetime.now().date()).days
@@ -1655,7 +1685,7 @@ if st.session_state.price and st.session_state.expiries:
                 pot_loss = mid * (stop_loss_pct / 100)
                 ev = (p_touch * pot_profit) - ((1 - p_touch) * pot_loss)
                 
-                # Apply skew penalty (Phase 5)
+                # Apply skew penalty
                 try:
                     if puts_df is not None and not puts_df.empty:
                         skew_val, _ = calculate_skew(calls_df, puts_df, S, row['strike'])
@@ -1663,7 +1693,7 @@ if st.session_state.price and st.session_state.expiries:
                 except:
                     pass
                 
-                # Calculate enhanced CTS with Gamma/Theta ratio (Phase 5)
+                # Calculate enhanced CTS with Gamma/Theta ratio
                 gt_ratio = calculate_gamma_theta_ratio(g, t)
                 cts = calculate_enhanced_cts(d, p_touch, gt_ratio, tech_score)
                 
@@ -1706,7 +1736,6 @@ if st.session_state.price and st.session_state.expiries:
             st.markdown("### ⭐ RECOMMENDED STRIKE FOR THIS EXPIRY")
             st.markdown(f"*Best structure based on highest Expected Value (EV) for {tier_label} strategy*")
             
-            # Display Gamma/Theta ratio if available
             if best_contract.get('gamma_theta_ratio', 0) > 1.0:
                 st.caption(f"⚡ Gamma/Theta Ratio: {best_contract['gamma_theta_ratio']:.2f} (Excellent acceleration)")
             
@@ -1831,6 +1860,9 @@ if st.session_state.price and st.session_state.expiries:
     process_tier_strategy(t_aggr, 0.40, 0.49, "Aggressive", st.session_state.get('tech_score', 0))
     process_tier_strategy(t_spec, 0.30, 0.39, "Speculative", st.session_state.get('tech_score', 0))
 
+    # ========================
+    # TECHNICAL ANALYSIS TAB
+    # ========================
     with t_tech:
         if not st.session_state.hist_data.empty:
             st.subheader("Momentum & Volatility Health")
@@ -1853,7 +1885,6 @@ if st.session_state.price and st.session_state.expiries:
             with col_a3:
                 st.metric("Historical Vol (20d)", f"{hv_val:.1f}%")
             
-            # Get current IV for spread
             current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
             if current_expiry:
                 calls_df, _ = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
@@ -1904,6 +1935,9 @@ if st.session_state.price and st.session_state.expiries:
         else:
             st.warning("⚠️ Technical analysis stream offline.")
 
+    # ========================
+    # AI RESEARCH TAB
+    # ========================
     with t_ai:
         if st.button("🔄 Refresh AI Analysis", use_container_width=True):
             st.session_state.ai_brief = ""
@@ -1918,7 +1952,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB (unchanged)
+    # PORTFOLIO TAB
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -2092,7 +2126,6 @@ if st.session_state.price and st.session_state.expiries:
                 
                 option_price, current_iv = get_current_option_price(ticker, expiry_date_str, strike)
                 
-                # Initialize default values
                 risk_score_display = risk_score
                 beta_factor_display = beta_factor if 'beta_factor' in locals() else 1.0
                 days_left = 0
@@ -2350,7 +2383,7 @@ if st.session_state.price and st.session_state.expiries:
                             st.error("❌ Failed to save. Check Google Sheets connection.")
 
     # ========================
-    # STRATEGY GUIDE (unchanged)
+    # STRATEGY GUIDE
     # ========================
     with t_edu:
         st.header("📖 Complete Strategy Guide & Indicator Dictionary")
@@ -2379,18 +2412,37 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        st.subheader("📊 Phase 5: Gamma/Theta Ratio & Skew Penalty (NEW)")
+        st.subheader("📊 Global Recommendations - Strategy Ranges")
+        st.markdown("""
+        | Strategy | Optimal Expiry Range | Delta Range | Goal |
+        |----------|---------------------|-------------|------|
+        | **Conservative** | 60+ DTE (closest to 90 days) | 0.50 - 0.60 | Higher probability, slower returns |
+        | **Aggressive** | 30 - 45 DTE | 0.40 - 0.49 | 50% in 5 days target |
+        | **Speculative** | 15 - 30 DTE | 0.30 - 0.39 | Fastest gamma, highest risk |
+        
+        These recommendations are **fixed** and based on the optimal expiry for each strategy. They do NOT change when you select a different expiry in the Workspace Adjuster.
+        """)
+        
+        st.divider()
+        
+        st.subheader("📊 Workspace Adjuster")
+        st.markdown("""
+        The Workspace Adjuster lets you select ANY expiry date. The Conservative, Aggressive, and Speculative tabs will update to show the best strikes for that specific expiry. This allows you to compare different expiries without re-analyzing the ticker.
+        """)
+        
+        st.divider()
+        
+        st.subheader("📊 Phase 5: Gamma/Theta Ratio & Skew Penalty")
         st.markdown("""
         | Indicator | What It Measures | How To Use |
         |-----------|------------------|------------|
         | **Gamma/Theta Ratio** | Acceleration vs time decay | > 1.0 = Good acceleration potential; > 1.5 = Excellent for 5-day targets |
         | **Skew Penalty** | Adjusts EV based on put/call skew | Negative skew = 15% EV penalty; Positive skew = 5% EV bonus |
-        | **Expiry Range Selector** | Filters options by days to expiry | Conservative: 60+ DTE; Aggressive: 30-45 DTE; Speculative: 15-30 DTE |
         """)
         
         st.divider()
         
-        st.subheader("📊 Advanced Quantitative Indicators (Phase 2)")
+        st.subheader("📊 Advanced Quantitative Indicators")
         st.markdown("""
         | Indicator | What It Measures | How To Use |
         |-----------|------------------|------------|
@@ -2403,13 +2455,13 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
-        st.subheader("📊 New: Put/Call Ratio & Beta Adjustment")
+        st.subheader("📊 Put/Call Ratio & Beta Adjustment")
         st.markdown("""
         | Indicator | What It Measures | How To Use |
         |-----------|------------------|------------|
         | **Put/Call Ratio (Volume)** | Ratio of put volume to call volume | > 1.2 = Bearish sentiment; < 0.8 = Bullish sentiment |
-        | **Beta** | Stock volatility relative to market (SPY) | Beta > 1.2 = More volatile (adjust position size down); Beta < 0.8 = Less volatile |
-        | **Beta-Adjusted Risk** | Risk score multiplied by beta factor | Higher beta = higher effective risk; Lower beta = lower effective risk |
+        | **Beta** | Stock volatility relative to market (SPY) | Beta > 1.2 = More volatile; Beta < 0.8 = Less volatile |
+        | **Beta-Adjusted Risk** | Risk score multiplied by beta factor | Higher beta = higher effective risk |
         """)
         
         st.divider()
@@ -2454,13 +2506,9 @@ if st.session_state.price and st.session_state.expiries:
         
         st.subheader("✅ Complete Trade Decision Framework")
         st.markdown("""
-        **Step 1: Market Regime**
-        - [ ] VIX between 12-25 (optimal for calls)
-        - [ ] Not within 7 days of earnings
+        **Step 1: Check Global Recs** - See optimal trades for each strategy across ALL expiries
         
-        **Step 2: Strategy Timeframe (NEW)**
-        - [ ] Select expiry range (Conservative/Aggressive/Speculative)
-        - [ ] Verify Gamma/Theta ratio > 1.0 for fast targets
+        **Step 2: Use Workspace Adjuster** - Select any expiry to analyze specific contracts
         
         **Step 3: Liquidity Filter (MANDATORY)**
         - [ ] Volume > 50 (preferably > 200)
@@ -2469,7 +2517,7 @@ if st.session_state.price and st.session_state.expiries:
         
         **Step 4: Strategy Match**
         - [ ] Delta matches your risk profile
-        - [ ] Days to expiry matches selected timeframe
+        - [ ] Days to expiry matches your target timeframe
         
         **Step 5: Technical Confirmation**
         - [ ] RSI between 30-70 (not overbought/oversold)
