@@ -172,6 +172,110 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
     except Exception:
         return stock_price * 1.05, stock_price * 0.95
 
+# ========================
+# PHASE 4: PUT/CALL RATIO & BETA ADJUSTMENT
+# ========================
+
+def calculate_put_call_ratio(ticker, expiry):
+    """
+    Calculate volume-based put/call ratio for sentiment analysis.
+    Ratio > 1 = Bearish sentiment (more puts), Ratio < 1 = Bullish sentiment (more calls)
+    """
+    try:
+        calls_df, puts_df = get_cached_option_chain(ticker, expiry)
+        if calls_df is None or puts_df is None:
+            return None, None, None
+        
+        # Get total volume for calls and puts
+        call_volume = calls_df['volume'].sum() if 'volume' in calls_df.columns else 0
+        put_volume = puts_df['volume'].sum() if 'volume' in puts_df.columns else 0
+        
+        if call_volume == 0:
+            return None, None, None
+        
+        pc_ratio = put_volume / call_volume
+        
+        # Interpret the ratio
+        if pc_ratio > 1.2:
+            sentiment = "🔴 Bearish (High put volume)"
+            interpretation = "Market participants are hedging or expecting downside"
+        elif pc_ratio < 0.8:
+            sentiment = "🟢 Bullish (High call volume)"
+            interpretation = "Market participants are optimistic"
+        else:
+            sentiment = "⚪ Neutral"
+            interpretation = "Balanced sentiment between puts and calls"
+        
+        return round(pc_ratio, 2), sentiment, interpretation, call_volume, put_volume
+    except Exception as e:
+        return None, None, None, None, None
+
+def calculate_beta(ticker, market_ticker="SPY", period="1y"):
+    """
+    Calculate stock's beta relative to market (SPY).
+    Beta > 1 = More volatile than market, Beta < 1 = Less volatile
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        market = yf.Ticker(market_ticker)
+        
+        stock_hist = stock.history(period=period)
+        market_hist = market.history(period=period)
+        
+        if stock_hist.empty or market_hist.empty:
+            return 1.0, "Insufficient data"
+        
+        # Calculate daily returns
+        stock_returns = stock_hist['Close'].pct_change().dropna()
+        market_returns = market_hist['Close'].pct_change().dropna()
+        
+        # Align dates
+        common_dates = stock_returns.index.intersection(market_returns.index)
+        if len(common_dates) < 30:
+            return 1.0, "Insufficient data"
+        
+        stock_returns_aligned = stock_returns[common_dates]
+        market_returns_aligned = market_returns[common_dates]
+        
+        # Calculate beta = covariance(stock, market) / variance(market)
+        covariance = np.cov(stock_returns_aligned, market_returns_aligned)[0][1]
+        variance = np.var(market_returns_aligned)
+        
+        if variance == 0:
+            return 1.0, "Calculation error"
+        
+        beta = covariance / variance
+        
+        # Interpret beta
+        if beta > 1.5:
+            interpretation = "🔴 HIGH BETA - Significantly more volatile than market"
+        elif beta > 1.2:
+            interpretation = "🟡 ELEVATED BETA - More volatile than market"
+        elif beta > 0.8:
+            interpretation = "🟢 MARKET BETA - Similar volatility to market"
+        elif beta > 0.5:
+            interpretation = "🟡 LOW BETA - Less volatile than market"
+        else:
+            interpretation = "🔵 VERY LOW BETA - Defensive stock"
+        
+        return round(beta, 2), interpretation
+    except Exception as e:
+        return 1.0, f"Error: {str(e)[:50]}"
+
+def calculate_beta_adjusted_risk(base_risk_score, beta):
+    """
+    Adjust risk score based on stock's beta.
+    Higher beta = higher risk adjustment, Lower beta = lower risk adjustment
+    """
+    # Beta adjustment factor: beta=1 → 1.0, beta=2 → 1.3, beta=0.5 → 0.7
+    adjustment_factor = 0.7 + (beta * 0.3)
+    adjustment_factor = max(0.5, min(1.5, adjustment_factor))
+    
+    adjusted_risk = base_risk_score * adjustment_factor
+    adjusted_risk = max(0, min(100, adjusted_risk))
+    
+    return round(adjusted_risk, 1), adjustment_factor
+
 def calculate_iv_hv_spread(current_iv, hv):
     """Calculate spread between Implied Volatility and Historical Volatility."""
     if current_iv is None or hv == 0:
@@ -958,6 +1062,16 @@ if st.session_state.price and st.session_state.expiries:
                     st.metric("Next Earnings", earnings_date.strftime('%Y-%m-%d'), delta=f"In {days_to_earnings} days")
             else:
                 st.metric("Next Earnings", "Not available", delta="Check manually")
+
+
+        st.divider()
+
+        # Beta displayed in its own row
+        beta, beta_interpretation = calculate_beta(st.session_state.current_ticker)
+        col_b1, col_b2, col_b3 = st.columns(3)
+        with col_b1:
+            st.metric("Beta (vs SPY)", f"{beta:.2f}", delta=beta_interpretation[:30])
+            st.caption(beta_interpretation)
         
         st.divider()
         
@@ -1044,7 +1158,7 @@ if st.session_state.price and st.session_state.expiries:
                 st.rerun()
 
     # ========================
-    # NEW: QUANT ANALYTICS TAB (Phase 2)
+    # QUANT ANALYTICS TAB (UPDATED with Put/Call Ratio & Beta)
     # ========================
     with t_quant:
         st.header("🔬 Quantitative Analytics")
@@ -1057,7 +1171,40 @@ if st.session_state.price and st.session_state.expiries:
             calls_df, puts_df = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
             
             if calls_df is not None and not calls_df.empty:
-                # 1. DYNAMIC TARGET CALCULATION
+                
+                # ========== NEW: PUT/CALL RATIO SECTION ==========
+                st.subheader("📊 Sentiment Indicators")
+                
+                pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
+                    st.session_state.current_ticker, current_expiry
+                )
+                
+                col_pc1, col_pc2, col_pc3 = st.columns(3)
+                with col_pc1:
+                    if pc_ratio:
+                        st.metric("Put/Call Ratio (Volume)", f"{pc_ratio:.2f}", delta=pc_sentiment)
+                        st.caption(pc_interpretation)
+                        st.caption(f"📊 Call Volume: {call_vol:,} | Put Volume: {put_vol:,}")
+                    else:
+                        st.info("Put/Call ratio unavailable - insufficient volume data")
+                
+                # ========== NEW: BETA SECTION ==========
+                with col_pc2:
+                    beta, beta_interpretation = calculate_beta(st.session_state.current_ticker)
+                    st.metric("Beta (vs SPY)", f"{beta:.2f}", delta=beta_interpretation[:20])
+                    st.caption(beta_interpretation)
+                
+                with col_pc3:
+                    # Volatility comparison
+                    hv = calculate_hv(st.session_state.hist_data)
+                    atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
+                    current_iv = calls_df.iloc[atm_idx]['impliedVolatility'].iloc[0] * 100 if not calls_df.empty else 0
+                    st.metric("Current IV", f"{current_iv:.1f}%")
+                    st.metric("Historical Vol", f"{hv:.1f}%")
+                
+                st.divider()
+                
+                # ========== EXISTING: DYNAMIC TARGET CALCULATION ==========
                 st.subheader("🎯 Dynamic Target Calculator (50% in 5 Days)")
                 
                 # Find ATM option
@@ -1075,29 +1222,28 @@ if st.session_state.price and st.session_state.expiries:
                     st.metric("Current Stock Price", f"${S:.2f}")
                     st.metric("ATM Strike", f"${selected_strike:.2f}")
                 with col_d2:
-                    st.metric("Target Stock Price (50% gain)", f"${target_stock:.2f}", delta=f"${target_stock - S:.2f}")
-                    st.metric("Stop Stock Price (25% loss)", f"${stop_stock:.2f}", delta=f"${stop_stock - S:.2f}")
+                    st.metric("Target Stock Price", f"${target_stock:.2f}", delta=f"${target_stock - S:.2f}")
+                    st.metric("Stop Stock Price", f"${stop_stock:.2f}", delta=f"${stop_stock - S:.2f}")
                 with col_d3:
                     st.metric("Required Move %", f"{((target_stock - S)/S)*100:.1f}%")
-                    st.caption(f"Option Delta: {d:.3f} | Gamma: {g:.4f}")
+                    st.caption(f"Delta: {d:.3f} | Gamma: {g:.4f}")
                 
-                # 2. IV/HV SPREAD
+                # ========== EXISTING: IV/HV SPREAD ==========
                 st.divider()
                 st.subheader("📊 Volatility Analysis")
                 
                 hv = calculate_hv(st.session_state.hist_data)
-                current_iv = selected_row['impliedVolatility'] * 100
                 spread, spread_status = calculate_iv_hv_spread(selected_row['impliedVolatility'], hv)
                 
                 col_v1, col_v2, col_v3 = st.columns(3)
                 with col_v1:
-                    st.metric("Implied Volatility (IV)", f"{current_iv:.1f}%")
+                    st.metric("Implied Volatility (IV)", f"{selected_row['impliedVolatility']*100:.1f}%")
                 with col_v2:
                     st.metric("Historical Volatility (HV)", f"{hv:.1f}%")
                 with col_v3:
                     st.metric("IV - HV Spread", f"{spread:.1f}%", delta=spread_status)
                 
-                # 3. SKEW ANALYSIS
+                # ========== EXISTING: SKEW ANALYSIS ==========
                 st.divider()
                 st.subheader("📐 Skew Analysis")
                 
@@ -1105,7 +1251,7 @@ if st.session_state.price and st.session_state.expiries:
                 st.metric("Put/Call Volatility Skew", f"{skew:.1f}%", delta=skew_status)
                 st.caption("Positive skew = Calls expensive (Bullish) | Negative skew = Puts expensive (Bearish)")
                 
-                # 4. TERM STRUCTURE
+                # ========== EXISTING: TERM STRUCTURE ==========
                 st.divider()
                 st.subheader("📈 Term Structure (IV by Expiry)")
                 
@@ -1118,7 +1264,7 @@ if st.session_state.price and st.session_state.expiries:
                 else:
                     st.info("Insufficient data for term structure")
                 
-                # 5. MAX PAIN
+                # ========== EXISTING: MAX PAIN ==========
                 st.divider()
                 st.subheader("💀 Max Pain Analysis")
                 
@@ -1127,9 +1273,9 @@ if st.session_state.price and st.session_state.expiries:
                 if max_pain:
                     st.metric("Max Pain Strike", f"${max_pain:.2f}")
                     if max_pain < S:
-                        st.caption(f"Max pain is ${S - max_pain:.2f} below current price - Potential gravitational pull down")
+                        st.caption(f"Max pain is ${S - max_pain:.2f} below current price - Potential downward pull")
                     else:
-                        st.caption(f"Max pain is ${max_pain - S:.2f} above current price - Potential gravitational pull up")
+                        st.caption(f"Max pain is ${max_pain - S:.2f} above current price - Potential upward pull")
                 else:
                     st.info("Max pain calculation unavailable")
                 
@@ -1619,7 +1765,11 @@ if st.session_state.price and st.session_state.expiries:
                         current_iv = 0.35
                     
                     sentiment_adj = st.session_state.current_sentiment.get('risk_adjustment', 0) if st.session_state.current_sentiment else 0
-                    risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv, sentiment_adj)
+                    # Calculate base risk score
+                    base_risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv, sentiment_adj)
+                    # Get beta and adjust
+                    beta, _ = calculate_beta(ticker)
+                    risk_score, beta_factor = calculate_beta_adjusted_risk(base_risk_score * 100, beta)
                     positions_with_risk.append((risk_score, idx, row_idx, pos))
                 except:
                     positions_with_risk.append((0.5, idx, row_idx, pos))
@@ -1689,7 +1839,7 @@ if st.session_state.price and st.session_state.expiries:
                             st.metric("Current Option Price", f"${option_price:.2f}")
                             pnl_color = "inverse" if pnl < 0 else "normal"
                             st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
-                            st.metric("Risk Score", f"{risk_score:.2f}", help="Higher = Higher Risk")
+                            st.metric("Risk Score", f"{risk_score:.1f}/100", help=f"Beta-adjusted: {beta_factor:.1f}x")
                         with col2:
                             st.metric("Days Left", f"{days_left}")
                             st.metric("Delta", f"{delta_calc:.3f}")
@@ -1913,6 +2063,17 @@ if st.session_state.price and st.session_state.expiries:
         
         st.divider()
         
+        st.subheader("📊 New: Put/Call Ratio & Beta Adjustment")
+        st.markdown("""
+        | Indicator | What It Measures | How To Use |
+        |-----------|------------------|------------|
+        | **Put/Call Ratio (Volume)** | Ratio of put volume to call volume | > 1.2 = Bearish sentiment; < 0.8 = Bullish sentiment |
+        | **Beta** | Stock volatility relative to market (SPY) | Beta > 1.2 = More volatile (adjust position size down); Beta < 0.8 = Less volatile |
+        | **Beta-Adjusted Risk** | Risk score multiplied by beta factor | Higher beta = higher effective risk; Lower beta = lower effective risk |
+        """)
+        
+        st.divider()
+               
         st.subheader("💧 Liquidity Indicators - Your First Filter")
         st.markdown("**Before looking at any other metric, check liquidity first.**")
         
