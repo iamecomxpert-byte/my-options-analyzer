@@ -84,7 +84,6 @@ def get_cached_current_price(ticker):
 # ========================
 
 def calculate_atr(df, period=14):
-    """Calculate Average True Range for volatility measurement."""
     try:
         high, low, close = df['High'], df['Low'], df['Close']
         tr1 = high - low
@@ -102,7 +101,6 @@ def calculate_atr(df, period=14):
         return 0.0, 0.0
 
 def calculate_rsi(df, period=14):
-    """Calculate Relative Strength Index."""
     try:
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(window=period).mean()
@@ -117,7 +115,6 @@ def calculate_rsi(df, period=14):
         return 50.0
 
 def calculate_hv(df, period=20):
-    """Calculate Historical Volatility (Realized Vol)."""
     try:
         returns = np.log(df['Close'] / df['Close'].shift(1))
         hv = returns.rolling(window=period).std() * np.sqrt(252)
@@ -129,10 +126,6 @@ def calculate_hv(df, period=20):
         return 0.0
 
 def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, days=5, target_gain_pct=0.50):
-    """
-    Calculate the stock price needed for target% option gain in N days.
-    Uses quadratic solution: 0.5*Gamma*(ΔS)² + Delta*(ΔS) + Theta*days - target_gain = 0
-    """
     try:
         target_option = option_price * (1 + target_gain_pct)
         target_gain = target_option - option_price
@@ -174,10 +167,6 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
 # ========================
 
 def calculate_put_call_ratio(ticker, expiry):
-    """
-    Calculate volume-based put/call ratio for sentiment analysis.
-    Ratio > 1 = Bearish sentiment (more puts), Ratio < 1 = Bullish sentiment (more calls)
-    """
     try:
         calls_df, puts_df = get_cached_option_chain(ticker, expiry)
         if calls_df is None or puts_df is None:
@@ -206,10 +195,6 @@ def calculate_put_call_ratio(ticker, expiry):
         return None, None, None, None, None
 
 def calculate_beta(ticker, market_ticker="SPY", period="1y"):
-    """
-    Calculate stock's beta relative to market (SPY).
-    Beta > 1 = More volatile than market, Beta < 1 = Less volatile
-    """
     try:
         stock = yf.Ticker(ticker)
         market = yf.Ticker(market_ticker)
@@ -254,10 +239,6 @@ def calculate_beta(ticker, market_ticker="SPY", period="1y"):
         return 1.0, f"Error: {str(e)[:50]}"
 
 def calculate_beta_adjusted_risk(base_risk_score, beta):
-    """
-    Adjust risk score based on stock's beta.
-    Higher beta = higher risk adjustment, Lower beta = lower risk adjustment
-    """
     adjustment_factor = 0.7 + (beta * 0.3)
     adjustment_factor = max(0.5, min(1.5, adjustment_factor))
     
@@ -267,7 +248,6 @@ def calculate_beta_adjusted_risk(base_risk_score, beta):
     return round(adjusted_risk, 1), adjustment_factor
 
 def calculate_iv_hv_spread(current_iv, hv):
-    """Calculate spread between Implied Volatility and Historical Volatility."""
     if current_iv is None or hv == 0:
         return 0, "N/A"
     spread = (current_iv * 100) - hv
@@ -280,7 +260,6 @@ def calculate_iv_hv_spread(current_iv, hv):
     return round(spread, 1), status
 
 def calculate_skew(calls_df, puts_df, current_price, at_the_money_strike=None):
-    """Calculate put/call implied volatility skew."""
     try:
         if at_the_money_strike is None:
             atm_strike = current_price
@@ -307,7 +286,6 @@ def calculate_skew(calls_df, puts_df, current_price, at_the_money_strike=None):
         return 0, "N/A"
 
 def calculate_term_structure(ticker, expiries):
-    """Calculate IV across expiries to determine contango/backwardation."""
     term_data = []
     for exp in expiries[:5]:
         try:
@@ -329,7 +307,6 @@ def calculate_term_structure(ticker, expiries):
     return term_data, "Insufficient data"
 
 def calculate_max_pain(calls_df, puts_df, strikes):
-    """Calculate Max Pain - the strike where option writers profit most."""
     try:
         max_pain = None
         min_pain_value = float('inf')
@@ -358,7 +335,6 @@ def calculate_max_pain(calls_df, puts_df, strikes):
         return None
 
 def get_vix():
-    """Get current VIX value."""
     try:
         vix = yf.Ticker("^VIX")
         hist = vix.history(period="1d")
@@ -369,7 +345,6 @@ def get_vix():
         return 15.0
 
 def get_market_regime(vix):
-    """Determine market regime based on VIX."""
     if vix < 12:
         return "🟢 LOW VOL", "Options cheap, low probability of large moves"
     elif vix < 20:
@@ -380,7 +355,6 @@ def get_market_regime(vix):
         return "🔴 HIGH VOL", "High volatility. Options overpriced. Caution with long calls"
 
 def get_earnings_date(ticker):
-    """Get next earnings date."""
     try:
         stock = yf.Ticker(ticker)
         calendar = stock.calendar
@@ -678,7 +652,7 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
                 return None
     return None
 
-# --- AI RESEARCH WITH SENTIMENT (Phase 3) ---
+# --- AI RESEARCH WITH SENTIMENT ---
 def fetch_news_finnhub(ticker):
     api_key = st.secrets.get("FINNHUB_API_KEY")
     if not api_key:
@@ -872,6 +846,110 @@ def get_hybrid_recommendation(option_price, entry_price, target, stop_loss,
         return "🔵 STRONG HOLD", f"All metrics aligned"
     return "🔵 HOLD", f"Normal monitoring"
 
+# --- DASHBOARD HELPER FUNCTIONS ---
+def calculate_strict_verdict(vix, rsi, iv_hv_spread, earnings_days, sentiment_score):
+    """Strict verdict: 4 out of 5 conditions must pass."""
+    conditions_passed = 0
+    
+    # Condition 1: VIX between 12-25
+    if 12 <= vix <= 25:
+        conditions_passed += 1
+    
+    # Condition 2: RSI between 30-70
+    if 30 <= rsi <= 70:
+        conditions_passed += 1
+    
+    # Condition 3: IV/HV spread between -10% and +10%
+    if -10 <= iv_hv_spread <= 10:
+        conditions_passed += 1
+    
+    # Condition 4: Earnings > 7 days away
+    if earnings_days is None or earnings_days > 7:
+        conditions_passed += 1
+    
+    # Condition 5: Sentiment not bearish (score > -0.3)
+    if sentiment_score > -0.3:
+        conditions_passed += 1
+    
+    if conditions_passed >= 4:
+        return "✅ BUY", conditions_passed, 72 + (conditions_passed * 5)
+    elif conditions_passed >= 2:
+        return "⏳ WAIT", conditions_passed, 40 + (conditions_passed * 10)
+    else:
+        return "❌ DROP", conditions_passed, 20 + (conditions_passed * 5)
+
+def calculate_weighted_verdict(vix, rsi, iv_hv_spread, sentiment_score, skew, beta):
+    """Weighted verdict using PhD model."""
+    # VIX score (20% weight)
+    if 12 <= vix <= 25:
+        vix_score = 100
+    elif vix < 12:
+        vix_score = 50
+    else:
+        vix_score = max(0, 100 - (vix - 25) * 4)
+    
+    # RSI score (15% weight)
+    if 30 <= rsi <= 70:
+        rsi_score = 100
+    elif rsi > 70:
+        rsi_score = max(0, 100 - (rsi - 70) * 3)
+    else:
+        rsi_score = max(0, 100 - (30 - rsi) * 3)
+    
+    # IV/HV spread score (20% weight)
+    if -10 <= iv_hv_spread <= 10:
+        spread_score = 100
+    elif iv_hv_spread > 20:
+        spread_score = 0
+    elif iv_hv_spread < -20:
+        spread_score = 50
+    else:
+        spread_score = 100 - abs(iv_hv_spread) * 2
+    
+    # Sentiment score (20% weight)
+    sentiment_score_normalized = max(0, min(100, (sentiment_score + 1) * 50))
+    
+    # Skew score (15% weight)
+    if skew > 0:
+        skew_score = 100
+    elif skew == 0:
+        skew_score = 60
+    else:
+        skew_score = 20
+    
+    # Beta score (10% weight)
+    if 0.8 <= beta <= 1.2:
+        beta_score = 100
+    elif 1.2 < beta <= 1.5:
+        beta_score = 70
+    elif beta < 0.8:
+        beta_score = 80
+    else:
+        beta_score = 40
+    
+    total_weighted = (vix_score * 0.20 + rsi_score * 0.15 + spread_score * 0.20 + 
+                      sentiment_score_normalized * 0.20 + skew_score * 0.15 + beta_score * 0.10)
+    
+    confidence = round(total_weighted, 1)
+    
+    if confidence >= 65:
+        return "✅ BUY", confidence
+    elif confidence >= 40:
+        return "⏳ WAIT", confidence
+    else:
+        return "❌ DROP", confidence
+
+def calculate_path_expectation(rsi, sentiment_score, atr_trend, vix_trend):
+    """Determine expected price path (pullback then rise vs straight up)."""
+    if rsi > 55 and sentiment_score > 0.3:
+        return "🚀 Straight up", "Strong momentum + bullish sentiment"
+    elif 40 <= rsi <= 55 and sentiment_score > 0:
+        return "📉📈 Pullback then rise", "Neutral RSI with positive sentiment - expect dip before breakout"
+    elif rsi < 40 and sentiment_score < 0:
+        return "📉 More downside first", "Weak RSI + bearish sentiment"
+    else:
+        return "📈 Gradual rise", "Mixed signals - expect slower appreciation"
+
 # --- PAGE CONFIG & SESSION STATE ---
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
@@ -879,7 +957,7 @@ state_keys = {
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
     'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30,
-    'current_sentiment': None
+    'current_sentiment': None, 'active_tab': 0
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -998,7 +1076,7 @@ if st.session_state.price and st.session_state.expiries:
 
     st.divider()
     
-    # Tabs (10 tabs)
+    # Tabs
     t_dashboard, t_quant, t_summary, t_cons, t_aggr, t_spec, t_tech, t_ai, t_portfolio, t_edu = st.tabs([
         "📊 Dashboard", "🔬 Quant Analytics", "📋 Global Recs", "🛡️ Conservative", 
         "⚡ Aggressive", "🎰 Speculative", "📊 Technical", "🤖 AI Research", 
@@ -1006,60 +1084,217 @@ if st.session_state.price and st.session_state.expiries:
     ])
 
     # ========================
-    # DASHBOARD TAB
+    # REDESIGNED DASHBOARD TAB
     # ========================
     with t_dashboard:
         st.header("📊 Trading Dashboard")
         
+        # Get all required metrics
         vix = get_vix()
-        regime_text, regime_desc = get_market_regime(vix)
+        hist_data = st.session_state.hist_data
         
-        col_m1, col_m2, col_m3 = st.columns(3)
-        with col_m1:
+        try:
+            atr_val, atr_pct = calculate_atr(hist_data)
+            rsi_val = calculate_rsi(hist_data)
+            hv_val = calculate_hv(hist_data)
+        except:
+            atr_val, atr_pct = 0.0, 0.0
+            rsi_val = 50.0
+            hv_val = 0.0
+        
+        # Get IV/HV spread
+        try:
+            current_expiry = st.session_state.expiries[0] if st.session_state.expiries else None
+            if current_expiry:
+                calls_df, _ = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
+                if calls_df is not None and not calls_df.empty:
+                    atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
+                    current_iv = calls_df.iloc[atm_idx]['impliedVolatility'].iloc[0] if not calls_df.empty else 0.35
+                else:
+                    current_iv = 0.35
+            else:
+                current_iv = 0.35
+        except:
+            current_iv = 0.35
+        
+        iv_hv_spread, _ = calculate_iv_hv_spread(current_iv, hv_val)
+        
+        # Get earnings info
+        earnings_date = get_earnings_date(st.session_state.current_ticker)
+        if earnings_date:
+            days_to_earnings = (earnings_date - datetime.now().date()).days
+        else:
+            days_to_earnings = None
+        
+        # Get sentiment
+        sentiment_data = getattr(st.session_state, 'current_sentiment', None)
+        if sentiment_data:
+            sentiment_score = sentiment_data.get('sentiment_score', 0)
+        else:
+            sentiment_score = 0
+        
+        # Get skew and beta
+        beta, _ = calculate_beta(st.session_state.current_ticker)
+        try:
+            if current_expiry and calls_df is not None and not calls_df.empty:
+                puts_df, _ = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
+                skew, _ = calculate_skew(calls_df, puts_df if puts_df is not None else pd.DataFrame(), S)
+            else:
+                skew = 0
+        except:
+            skew = 0
+        
+        # ========== VERDICT SECTION ==========
+        st.subheader("🎯 Market Verdict")
+        
+        strict_verdict, strict_passed, strict_confidence = calculate_strict_verdict(
+            vix, rsi_val, iv_hv_spread, days_to_earnings, sentiment_score
+        )
+        weighted_verdict, weighted_confidence = calculate_weighted_verdict(
+            vix, rsi_val, iv_hv_spread, sentiment_score, skew, beta
+        )
+        
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            st.metric("STRICT (4/5 Conditions)", strict_verdict, delta=f"{strict_passed}/5 conditions met")
+            st.caption(f"Confidence: {strict_confidence:.0f}%")
+        with col_v2:
+            st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
+            st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
+        
+        # ========== PATH EXPECTATION ==========
+        path_icon, path_text = calculate_path_expectation(rsi_val, sentiment_score, atr_pct > 1.5, vix > 20)
+        st.info(f"{path_icon} **Path Expectation:** {path_text}")
+        
+        # ========== BEST STRATEGY ==========
+        best_strategy = None
+        best_score = 0
+        if st.session_state.global_conservative:
+            if st.session_state.global_conservative['cts'] > best_score:
+                best_score = st.session_state.global_conservative['cts']
+                best_strategy = "🛡️ Conservative"
+        if st.session_state.global_aggressive:
+            if st.session_state.global_aggressive['cts'] > best_score:
+                best_score = st.session_state.global_aggressive['cts']
+                best_strategy = "⚡ Aggressive"
+        if st.session_state.global_speculative:
+            if st.session_state.global_speculative['cts'] > best_score:
+                best_score = st.session_state.global_speculative['cts']
+                best_strategy = "🎰 Speculative"
+        
+        if best_strategy:
+            st.success(f"🏆 **Best Strategy:** {best_strategy} (Score: {best_score}/100)")
+        
+        st.divider()
+        
+        # ========== STRATEGY TABLE ==========
+        st.subheader("📋 Strategy Recommendations")
+        
+        # Build strategy table data
+        table_data = []
+        strategies = [
+            ("🛡️ Conservative", st.session_state.global_conservative, 0),
+            ("⚡ Aggressive", st.session_state.global_aggressive, 1),
+            ("🎰 Speculative", st.session_state.global_speculative, 2)
+        ]
+        
+        for name, profile, tab_index in strategies:
+            if profile:
+                entry = profile['mid']
+                target = entry * (1 + profit_target_pct / 100)
+                stop = entry * (1 - stop_loss_pct / 100)
+                score = profile['cts']
+                
+                if score >= 65:
+                    action = "✅ BUY"
+                elif score >= 55:
+                    action = "⏳ WAIT"
+                else:
+                    action = "❌ DROP"
+                
+                table_data.append({
+                    "Strategy": name,
+                    "Strike": f"${profile['strike']:.2f} Call",
+                    "Entry": f"${entry:.2f}",
+                    "Target": f"${target:.2f}",
+                    "Stop": f"${stop:.2f}",
+                    "Score": f"{score}/100",
+                    "Action": action,
+                    "tab_index": tab_index
+                })
+        
+        if table_data:
+            # Display as clickable buttons in a grid
+            st.markdown("**Click any row to view detailed analysis:**")
+            for row in table_data:
+                col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 2, 1.5, 1.5, 1.5, 1.5, 1.5])
+                with col1:
+                    st.write(row["Strategy"])
+                with col2:
+                    st.write(row["Strike"])
+                with col3:
+                    st.write(row["Entry"])
+                with col4:
+                    st.write(row["Target"])
+                with col5:
+                    st.write(row["Stop"])
+                with col6:
+                    st.write(row["Score"])
+                with col7:
+                    if st.button(row["Action"], key=f"strategy_{row['tab_index']}", use_container_width=True):
+                        st.session_state.active_tab = 3 + row['tab_index']  # t_cons is index 3
+                        st.rerun()
+                st.divider()
+        else:
+            st.warning("No strategy recommendations available. Analyze a ticker first.")
+        
+        st.divider()
+        
+        # ========== KEY METRICS ROW 1 ==========
+        st.subheader("📊 Key Market Metrics")
+        col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+        with col_k1:
+            regime_text, _ = get_market_regime(vix)
             st.metric("VIX (Fear Index)", f"{vix:.1f}", delta=regime_text)
-            st.caption(regime_desc)
-        
-        with col_m2:
-            hist_data = st.session_state.hist_data
-            try:
-                atr_val, atr_pct = calculate_atr(hist_data)
-            except:
-                atr_val, atr_pct = 0.0, 0.0
-            try:
-                rsi_val = calculate_rsi(hist_data)
-            except:
-                rsi_val = 50.0
-            
+        with col_k2:
             st.metric("ATR (14d)", f"${atr_val:.2f}", delta=f"{atr_pct:.1f}% of price")
-            rsi_status = "🟢 Neutral" if 30 <= rsi_val <= 70 else ("🔴 Overbought" if rsi_val > 70 else "🟠 Oversold")
+        with col_k3:
+            rsi_status = "Overbought" if rsi_val > 70 else ("Oversold" if rsi_val < 30 else "Neutral")
             st.metric("RSI (14d)", f"{rsi_val:.1f}", delta=rsi_status)
+        with col_k4:
+            st.metric("Beta (vs SPY)", f"{beta:.2f}")
         
-        with col_m3:
-            earnings_date = get_earnings_date(st.session_state.current_ticker)
-            if earnings_date:
-                days_to_earnings = (earnings_date - datetime.now().date()).days
+        st.divider()
+        
+        # ========== KEY METRICS ROW 2 ==========
+        col_k5, col_k6, col_k7, col_k8 = st.columns(4)
+        with col_k5:
+            spread_status = "Fair" if -10 <= iv_hv_spread <= 10 else ("Expensive" if iv_hv_spread > 10 else "Cheap")
+            st.metric("IV/HV Spread", f"{iv_hv_spread:+.1f}%", delta=spread_status)
+        with col_k6:
+            skew_status = "Bullish" if skew > 0 else ("Bearish" if skew < 0 else "Neutral")
+            st.metric("Skew", f"{skew:+.1f}%", delta=skew_status)
+        with col_k7:
+            if sentiment_data:
+                sentiment_color = "Bullish" if sentiment_score > 0.3 else ("Bearish" if sentiment_score < -0.3 else "Neutral")
+                st.metric("AI Sentiment", f"{sentiment_score:+.2f}", delta=sentiment_color)
+            else:
+                st.metric("AI Sentiment", "N/A", delta="Run AI Research")
+        with col_k8:
+            if days_to_earnings:
                 if days_to_earnings < 0:
-                    st.metric("Next Earnings", "Recently passed", delta="No immediate risk")
+                    st.metric("Next Earnings", "Recently passed")
                 elif days_to_earnings < 7:
                     st.warning(f"⚠️ Earnings in {days_to_earnings} days")
-                    st.metric("Earnings Warning", f"In {days_to_earnings} days", delta="HIGH RISK")
+                    st.metric("Earnings", f"In {days_to_earnings} days", delta="HIGH RISK")
                 else:
-                    st.metric("Next Earnings", earnings_date.strftime('%Y-%m-%d'), delta=f"In {days_to_earnings} days")
+                    st.metric("Next Earnings", f"In {days_to_earnings} days")
             else:
-                st.metric("Next Earnings", "Not available", delta="Check manually")
-
-        st.divider()
-
-        # Beta displayed in its own row
-        beta, beta_interpretation = calculate_beta(st.session_state.current_ticker)
-        col_b1, col_b2, col_b3 = st.columns(3)
-        with col_b1:
-            st.metric("Beta (vs SPY)", f"{beta:.2f}", delta=beta_interpretation[:30])
-            st.caption(beta_interpretation)
+                st.metric("Next Earnings", "N/A")
         
         st.divider()
         
-        # Sentiment Section
+        # ========== SENTIMENT SECTION (Keep existing) ==========
         st.subheader("🤖 AI Market Sentiment")
         sentiment_data = getattr(st.session_state, 'current_sentiment', None)
         if sentiment_data and sentiment_data.get('sentiment_score', 0) != 0:
@@ -1096,53 +1331,9 @@ if st.session_state.price and st.session_state.expiries:
             if st.button("🔍 Analyze Sentiment Now"):
                 st.session_state.ai_brief = ""
                 st.rerun()
-        
-        st.divider()
-        
-        # Active Positions Summary
-        st.subheader("📋 Active Positions Summary")
-        positions = get_portfolio_positions("Mukul")
-        if positions:
-            pos_data = []
-            for idx, (row_idx, pos) in enumerate(positions[:5]):
-                entry = float(pos['entry_price'])
-                contracts = int(pos['contracts'])
-                option_price, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
-                if option_price:
-                    pnl_pct = ((option_price - entry) / entry) * 100
-                    pos_data.append({
-                        "Position": f"{pos['ticker']} ${float(pos['strike']):.2f} Call",
-                        "P&L": f"{pnl_pct:+.1f}%",
-                        "Risk": "🟢 LOW" if pnl_pct > 10 else ("🟡 MEDIUM" if pnl_pct > -10 else "🔴 HIGH")
-                    })
-            if pos_data:
-                st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
-            else:
-                st.info("No active positions with price data")
-        else:
-            st.info("No active positions. Add positions in Portfolio tab.")
-        
-        st.divider()
-        
-        # Quick Actions
-        st.subheader("🚀 Quick Actions")
-        col_q1, col_q2, col_q3 = st.columns(3)
-        with col_q1:
-            if st.button("🔍 Analyze Current Ticker", use_container_width=True):
-                st.rerun()
-        with col_q2:
-            if st.button("🤖 Refresh Sentiment", use_container_width=True):
-                st.session_state.ai_brief = ""
-                if 'current_sentiment' in st.session_state:
-                    del st.session_state.current_sentiment
-                st.rerun()
-        with col_q3:
-            if st.button("🗑️ Clear Cache", use_container_width=True):
-                st.cache_data.clear()
-                st.rerun()
 
     # ========================
-    # QUANT ANALYTICS TAB
+    # QUANT ANALYTICS TAB (unchanged)
     # ========================
     with t_quant:
         st.header("🔬 Quantitative Analytics")
@@ -1584,7 +1775,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB (FULLY PRESERVED with NameError FIX)
+    # PORTFOLIO TAB (unchanged)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -1758,9 +1949,9 @@ if st.session_state.price and st.session_state.expiries:
                 
                 option_price, current_iv = get_current_option_price(ticker, expiry_date_str, strike)
                 
-                # Initialize default values to prevent NameError
+                # Initialize default values
                 risk_score_display = risk_score
-                beta_factor_display = 1.0
+                beta_factor_display = beta_factor if 'beta_factor' in dir() else 1.0
                 days_left = 0
                 pnl = 0
                 pnl_pct = 0
@@ -2016,7 +2207,7 @@ if st.session_state.price and st.session_state.expiries:
                             st.error("❌ Failed to save. Check Google Sheets connection.")
 
     # ========================
-    # STRATEGY GUIDE
+    # STRATEGY GUIDE (unchanged)
     # ========================
     with t_edu:
         st.header("📖 Complete Strategy Guide & Indicator Dictionary")
