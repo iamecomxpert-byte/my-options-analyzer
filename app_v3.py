@@ -609,6 +609,132 @@ def get_strategy_for_expiry(ticker, expiry, delta_min, delta_max, profit_target_
     except Exception:
         return None
 
+def estimate_pullback_entry(current_price, atr_pct, rsi, sentiment_score, curr_indicators, max_pain=None):
+    """
+    Estimate optimal entry price during pullback based on multiple technical factors
+    """
+    # Pullback magnitude based on RSI
+    if 40 <= rsi <= 45:  # Lower RSI = deeper pullback likely
+        pullback_pct = atr_pct * 1.5  # 1.5x ATR for deeper pullback
+        confidence = "Medium-High"
+    elif 45 < rsi <= 50:  # Mid-range RSI
+        pullback_pct = atr_pct * 1.0  # 1x ATR
+        confidence = "High"
+    else:  # 50-55 RSI
+        pullback_pct = atr_pct * 0.7  # 0.7x ATR for shallow pullback
+        confidence = "Medium"
+    
+    # Sentiment adjustment (stronger sentiment = shallower pullback)
+    if sentiment_score > 0.5:
+        pullback_pct = pullback_pct * 0.7  # Shallow pullback
+        sentiment_effect = "Strong bullish sentiment limiting downside"
+    elif sentiment_score > 0.2:
+        pullback_pct = pullback_pct * 0.85  # Mild pullback
+        sentiment_effect = "Positive sentiment providing support"
+    else:
+        sentiment_effect = "Neutral sentiment - technical pullback expected"
+    
+    estimated_entry = current_price * (1 - pullback_pct / 100)
+    
+    # Get technical levels
+    lower_band = curr_indicators['lower']
+    middle_band = curr_indicators['sma20']
+    
+    return {
+        'estimated_entry': round(estimated_entry, 2),
+        'pullback_percent': round(pullback_pct, 1),
+        'confidence': confidence,
+        'sentiment_effect': sentiment_effect,
+        'technical_levels': {
+            'sma20_support': round(middle_band, 2),
+            'lower_bb_support': round(lower_band, 2),
+            'max_pain_support': round(max_pain, 2) if max_pain and max_pain < current_price else None
+        }
+    }
+
+def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, sentiment_score, atr_pct):
+    """
+    Generate complete pullback entry recommendation with actionable levels
+    """
+    # Get technical indicators
+    curr_indicators, _ = get_technicals(hist_data)
+    
+    # Calculate different entry estimates
+    atr_entry = current_price * (1 - atr_pct / 100)
+    bollinger_entry = curr_indicators['lower']
+    sma_entry = curr_indicators['sma20']
+    max_pain_entry = max_pain if max_pain and max_pain < current_price else None
+    
+    # Calculate confidence-weighted average entry
+    entries = []
+    weights = []
+    
+    # ATR-based entry (weight: rsi-dependent)
+    if rsi < 45:
+        atr_weight = 0.4  # Deeper pullback expected
+    else:
+        atr_weight = 0.25
+    entries.append(atr_entry)
+    weights.append(atr_weight)
+    
+    # Bollinger Band entry (weight: 0.3)
+    entries.append(bollinger_entry)
+    weights.append(0.3)
+    
+    # SMA20 entry (weight: 0.2)
+    entries.append(sma_entry)
+    weights.append(0.2)
+    
+    # Max Pain entry (if available, weight: 0.25)
+    if max_pain_entry:
+        entries.append(max_pain_entry)
+        weights.append(0.25)
+    else:
+        # Normalize weights
+        weights = [w/sum(weights) for w in weights]
+    
+    # Calculate weighted average
+    weighted_entry = sum(e * w for e, w in zip(entries, weights))
+    
+    # Sentiment adjustment
+    if sentiment_score > 0.5:
+        entry_adjustment = 0.95  # Shallower pullback (only 5% below current)
+        sentiment_text = "Strongly Bullish - Limited downside expected"
+    elif sentiment_score > 0.2:
+        entry_adjustment = 0.92  # 8% below current
+        sentiment_text = "Bullish - Moderate support expected"
+    else:
+        entry_adjustment = 0.88  # 12% below current
+        sentiment_text = "Neutral - Technical pullback expected"
+    
+    final_entry = weighted_entry * entry_adjustment
+    
+    # Calculate estimated time to pullback (in days)
+    if rsi > 50:
+        estimated_days = 2  # Quick pullback
+    elif rsi > 45:
+        estimated_days = 3  # Moderate pullback
+    else:
+        estimated_days = 5  # Deeper, longer pullback
+    
+    return {
+        'estimated_entry': round(final_entry, 2),
+        'entry_range': {
+            'aggressive': round(min(entries), 2),  # Lowest price
+            'conservative': round(max(entries), 2),  # Highest entry
+            'optimal': round(final_entry, 2)
+        },
+        'support_levels': {
+            'first_support': round(sma_entry, 2),
+            'second_support': round(bollinger_entry, 2),
+            'deep_support': round(max_pain_entry, 2) if max_pain_entry else round(bollinger_entry * 0.97, 2)
+        },
+        'estimated_pullback_pct': round(((current_price - final_entry) / current_price) * 100, 1),
+        'estimated_days_to_pullback': estimated_days,
+        'sentiment_text': sentiment_text,
+        'current_price': current_price
+    }
+
 # --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
 def get_google_sheet():
@@ -1284,6 +1410,13 @@ if st.session_state.price and st.session_state.expiries:
             atr_val, atr_pct = 0.0, 0.0
             rsi_val = 50.0
             hv_val = 0.0
+
+        sentiment_data = getattr(st.session_state, 'current_sentiment', None)
+        if sentiment_data:
+            sentiment_score = sentiment_data.get('sentiment_score', 0)
+        else:
+            sentiment_score = 0
+            st.caption("💡 Run AI Research in the AI tab for sentiment analysis")
         
         current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
         
@@ -1343,6 +1476,121 @@ if st.session_state.price and st.session_state.expiries:
         
         path_icon, path_text = calculate_path_expectation(rsi_val, sentiment_score, atr_pct > 1.5, vix > 20)
         st.info(f"{path_icon} **Path Expectation:** {path_text}")
+        
+        # ADD THIS RIGHT AFTER THE ABOVE LINE:
+        # ============================================================
+        # PULLBACK ENTRY ESTIMATES (Only for Pullback Then Rise scenario)
+        # ============================================================
+        if path_icon == "📉📈 Pullback then rise":
+            st.divider()
+            st.subheader("🎯 Pullback Entry Estimates")
+            st.caption("Based on ATR, RSI, Bollinger Bands, and Max Pain analysis")
+            
+            # Get current indicators for pullback calculation
+            curr_indicators, _ = get_technicals(hist_data)
+            
+            # Get max pain for current expiry if available
+            max_pain_value = None
+            if current_expiry:
+                try:
+                    calls_df, puts_df = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
+                    if calls_df is not None and not calls_df.empty:
+                        strikes = sorted(calls_df['strike'].unique())
+                        max_pain_value = calculate_max_pain(calls_df, puts_df, strikes)
+                except:
+                    pass
+            
+            # Calculate pullback recommendations
+            pullback_data = get_pullback_entry_recommendation(
+                S, hist_data, max_pain_value, rsi_val, sentiment_score, atr_pct
+            )
+            
+            # Display entry estimates in columns
+            col_e1, col_e2, col_e3 = st.columns(3)
+            
+            with col_e1:
+                st.metric(
+                    "🎯 Optimal Entry Price", 
+                    f"${pullback_data['estimated_entry']:.2f}",
+                    delta=f"-{pullback_data['estimated_pullback_pct']:.1f}% from current"
+                )
+                st.caption(f"⏰ Expected in ~{pullback_data['estimated_days_to_pullback']} trading days")
+                st.caption(f"📊 Confidence: {pullback_data.get('confidence', 'Medium')}")
+            
+            with col_e2:
+                st.write("**📍 Entry Zones**")
+                st.write(f"🟢 **Optimal:** ${pullback_data['entry_range']['optimal']:.2f}")
+                st.write(f"🟡 **Conservative:** ${pullback_data['entry_range']['conservative']:.2f}")
+                st.write(f"🔴 **Aggressive:** ${pullback_data['entry_range']['aggressive']:.2f}")
+            
+            with col_e3:
+                st.write("**🛡️ Support Levels**")
+                st.write(f"1st Support (SMA20): ${pullback_data['support_levels']['first_support']:.2f}")
+                st.write(f"2nd Support (Lower BB): ${pullback_data['support_levels']['second_support']:.2f}")
+                if pullback_data['support_levels']['deep_support']:
+                    st.write(f"3rd Support (Max Pain): ${pullback_data['support_levels']['deep_support']:.2f}")
+            
+            # Sentiment context
+            st.caption(f"💭 Sentiment Context: {pullback_data['sentiment_text']}")
+            
+            # Actionable alert based on current price vs entry
+            st.divider()
+            st.subheader("📋 Action Plan")
+            
+            current_price = pullback_data['current_price']
+            optimal_entry = pullback_data['estimated_entry']
+            conservative_entry = pullback_data['entry_range']['conservative']
+            
+            if current_price <= conservative_entry * 1.02:
+                st.success("🔔 **PRICE APPROACHING ENTRY ZONE!** Consider placing limit orders NOW.")
+                st.info(f"📝 **Recommended Action:** Set limit buy at ${optimal_entry:.2f} (optimal) or market buy if price drops below ${conservative_entry:.2f}")
+            elif current_price <= optimal_entry * 1.05:
+                st.info("⏳ **Price moving toward target entry.** Getting ready to buy.")
+                st.info(f"📝 **Recommended Action:** Set limit order at ${optimal_entry:.2f} and wait for fill")
+            else:
+                st.warning(f"⏰ **Current price ${current_price:.2f} is above optimal entry.**")
+                st.info(f"📝 **Recommended Action:** Wait for pullback to ${optimal_entry:.2f}. Place limit order and be patient.")
+            
+            # Option strategy recommendation based on pullback
+            col_o1, col_o2 = st.columns(2)
+            with col_o1:
+                st.write("**📊 Recommended Option Strategy**")
+                st.write("- Wait for pullback to complete")
+                st.write(f"- Enter when price hits ${optimal_entry:.2f} - ${conservative_entry:.2f}")
+                st.write("- Use 30-45 DTE calls for gamma ramp")
+            with col_o2:
+                st.write("**⚠️ Risk Management**")
+                st.write(f"- Stop loss: Below ${pullback_data['support_levels']['second_support']:.2f}")
+                st.write("- Position size: 50-70% of normal (save dry powder)")
+                st.write("- Add more if price reaches aggressive entry")
+            
+            # Visual gauge showing current price vs entry zones
+            st.divider()
+            st.subheader("📊 Price Position Gauge")
+            
+            # Create a simple visual representation
+            max_price = current_price * 1.02
+            min_price = pullback_data['entry_range']['aggressive'] * 0.98
+            
+            # Calculate position as percentage
+            position_pct = ((current_price - min_price) / (max_price - min_price)) * 100
+            position_pct = max(0, min(100, position_pct))
+            
+            # Display gauge
+            st.progress(position_pct / 100)
+            st.caption(f"Current price is {position_pct:.0f}% of the way from aggressive entry to 2% above current")
+            
+            col_g1, col_g2, col_g3 = st.columns(3)
+            with col_g1:
+                st.caption(f"🔴 Aggressive Entry\n${pullback_data['entry_range']['aggressive']:.2f}")
+            with col_g2:
+                st.caption(f"🟡 Optimal Entry\n${pullback_data['estimated_entry']:.2f}")
+            with col_g3:
+                st.caption(f"🟢 Conservative Entry\n${pullback_data['entry_range']['conservative']:.2f}")
+        
+        # ============================================================
+        # END OF PULLBACK ENTRY ESTIMATES CODE
+        # ============================================================
         
         st.divider()
         
