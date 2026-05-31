@@ -1167,7 +1167,7 @@ if fetch_btn:
     st.session_state.global_speculative = None
     st.session_state.last_selected_expiry = None
     st.session_state.data_fetched = True
-    
+    st.rerun()
     try:
         hist = get_cached_stock_history(ticker_input, "100d")
         
