@@ -2858,14 +2858,13 @@ if st.session_state.price and st.session_state.expiries:
                         # Calculate realistic target based on current price + expected move
                         # Options typically need 30-50% move to be profitable
                         target = option_price * 1.35  # 35% target from current
-                        st.caption(f"🔄 Target adjusted from ${stored_target:.2f} to ${target:.2f} (based on current price)")
-                    
+                                            
                     # Stop should be BELOW current price
                     if stored_stop < option_price:
                         stop = stored_stop
                     else:
                         stop = option_price * 0.70  # 30% stop from current
-                        st.caption(f"🔄 Stop adjusted from ${stored_stop:.2f} to ${stop:.2f} (based on current price)")
+                        
                 else:
                     target = stored_target
                     stop = stored_stop
