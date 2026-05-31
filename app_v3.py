@@ -3001,6 +3001,19 @@ if st.session_state.price and st.session_state.expiries:
                         
                         # Sub-section A: Quantitative Forecast
                         st.markdown("#### 📊 Quantitative Forecast (5-Day)")
+
+                        # ========== DEBUG: Check input values before forecast ==========
+                        st.caption(f"🔍 PRE-FORECAST CHECK:")
+                        st.caption(f"   option_price = {option_price}")
+                        st.caption(f"   stock_price = {stock_price}")
+                        st.caption(f"   strike = {strike}")
+                        st.caption(f"   delta_calc = {delta_calc}")
+                        st.caption(f"   gamma = {gamma}")
+                        st.caption(f"   theta = {theta}")
+                        st.caption(f"   current_iv = {current_iv}")
+                        st.caption(f"   days_left = {days_left}")
+                        # ================================================================
+
                         
                         # Calculate forecasts
                         expected_price, price_upper, price_lower, theta_decay_5d, iv_impact, leverage = forecast_5day_price(
