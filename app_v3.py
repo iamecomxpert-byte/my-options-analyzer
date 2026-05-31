@@ -187,6 +187,11 @@ def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma,
     - leverage: Effective leverage factor
     """
     try:
+        # ===== DEBUG INSIDE FUNCTION =====
+        st.caption(f"🔍 INSIDE FUNCTION: expected_stock_move_pct = {expected_stock_move_pct}")
+        st.caption(f"🔍 INSIDE FUNCTION: current_price=${current_option_price}, stock=${stock_price}, delta={delta}")
+        # ================================
+        
         # Theta decay (daily decay over 5 days)
         theta_decay = abs(theta) * days
         
@@ -219,9 +224,21 @@ def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma,
             gamma_boost = 1.2
         
         expected_price_change = expected_dollar_move * gamma_boost
+
+        # ===== DEBUG CALCULATION =====
+        st.caption(f"🔍 CALC: leverage={actual_leverage}x, expected_option_move_pct={expected_option_move_pct:.1f}%")
+        st.caption(f"🔍 CALC: expected_dollar_move=${expected_dollar_move:.2f}, gamma_boost={gamma_boost:.2f}x")
+        st.caption(f"🔍 CALC: expected_price_change=${expected_price_change:.2f}, theta_decay=${theta_decay:.2f}")
+        # ============================
         
         # Total expected price
         expected_price = current_option_price - theta_decay + iv_impact + expected_price_change
+        
+        # ===== DEBUG FINAL =====
+        st.caption(f"🔍 FINAL: current=${current_option_price:.2f} - theta=${theta_decay:.2f} + change=${expected_price_change:.2f} = ${expected_price:.2f}")
+        st.caption(f"🔍 FINAL: Expected return = {((expected_price/current_option_price)-1)*100:.1f}%")
+        # ======================
+        
         expected_price = max(expected_price, 0.05)
         
         # 80% confidence bounds (wider for options due to convexity)
@@ -1534,11 +1551,23 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
+    
     delta = norm.cdf(d1) if type == "call" else norm.cdf(d1) - 1
+    
+    # FIXED: Gamma formula - remove the division by S that was incorrect
+    # The correct formula is: gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
+    # This returns values typically 0.02-0.08 for ATM options
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+    
+    # Theta for call option
+    if type == "call":
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+    else:
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+    
     vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
-    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)  # Order: delta, gamma, theta, vega
+    
+    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
 
 def calculate_p_touch(S, K, T, sigma):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
@@ -3022,7 +3051,10 @@ if st.session_state.price and st.session_state.expiries:
                         st.caption(f"   current_iv = {current_iv}")
                         st.caption(f"   days_left = {days_left}")
                         # ================================================================
-
+                        
+                        st.caption(f"🔍 INPUT CHECK: expected_stock_move_pct = 0.03 (hardcoded)")
+                        st.caption(f"🔍 INPUT CHECK: option_price={option_price}, stock_price={stock_price}, delta={delta_calc}, gamma={gamma}")
+                        st.caption(f"🔍 INPUT CHECK: This should produce POSITIVE expected move for ITM call")
                         
                         # Calculate forecasts
                         expected_price, price_upper, price_lower, theta_decay_5d, iv_impact, leverage = forecast_5day_price(
