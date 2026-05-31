@@ -2937,9 +2937,33 @@ if st.session_state.price and st.session_state.expiries:
                     risk_indicator = "🟡 MEDIUM"
                 else:
                     risk_indicator = "🟢 LOW"
-                
+
                 rec_icon = rec_icon_full.split()[0]
-                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                # Calculate 5-day forecast for the header
+                expected_price_5d = None
+                expected_5d_pnl = None
+                expected_5d_pnl_pct = None
+                
+                if option_price and option_price > 0 and stock_price and stock_price > 0:
+                    try:
+                        expected_price_5d, _, _, _, _, _ = forecast_5day_price(
+                            option_price, stock_price, strike, delta_calc, gamma, theta, 0, current_iv, 0, 5, 0.03
+                        )
+                        expected_5d_pnl = (expected_price_5d - option_price) * contracts * 100
+                        expected_5d_pnl_pct = ((expected_price_5d / option_price) - 1) * 100
+                    except:
+                        pass
+                
+                # Build the summary with 5-day forecast if available
+                if expected_price_5d and expected_5d_pnl is not None:
+                    if expected_5d_pnl >= 0:
+                        pnl_5d_display = f"🟢 +${expected_5d_pnl:,.0f} (+{expected_5d_pnl_pct:+.1f}%)"
+                    else:
+                        pnl_5d_display = f"🔴 -${abs(expected_5d_pnl):,.0f} ({expected_5d_pnl_pct:+.1f}%)"
+                    
+                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} → ${expected_price_5d:.2f} (5d: {pnl_5d_display}) | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                else:
+                    summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
                 
                 with st.expander(summary):
                     st.markdown("### 📊 Position Summary")
