@@ -696,26 +696,63 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
     # Calculate weighted average
     weighted_entry = sum(e * w for e, w in zip(entries, weights))
     
-    # Sentiment adjustment
+    # Cap the weighted entry to a maximum realistic pullback
+    # Maximum pullback based on ATR (never more than 3x ATR)
+    max_realistic_pullback_pct = min(atr_pct * 3, 15)  # Cap at 15% absolute max
+    max_realistic_entry = current_price * (1 - max_realistic_pullback_pct / 100)
+    
+    if weighted_entry < max_realistic_entry:
+        weighted_entry = max_realistic_entry
+    
+    # Sentiment adjustment (MORE CONSERVATIVE)
     if sentiment_score > 0.5:
-        entry_adjustment = 0.95  # Shallower pullback (only 5% below current)
-        sentiment_text = "Strongly Bullish - Limited downside expected"
+        entry_adjustment = 0.98  # Only 2% pullback for strong bullish
+        sentiment_text = "Strongly Bullish - Very limited downside expected"
+        sentiment_factor = "shallow"
     elif sentiment_score > 0.2:
-        entry_adjustment = 0.92  # 8% below current
-        sentiment_text = "Bullish - Moderate support expected"
+        entry_adjustment = 0.96  # 4% pullback for bullish
+        sentiment_text = "Bullish - Limited downside expected"
+        sentiment_factor = "mild"
+    elif sentiment_score > 0:
+        entry_adjustment = 0.93  # 7% pullback for leaning bullish
+        sentiment_text = "Leaning Bullish - Moderate pullback possible"
+        sentiment_factor = "moderate"
     else:
-        entry_adjustment = 0.88  # 12% below current
-        sentiment_text = "Neutral - Technical pullback expected"
+        entry_adjustment = 0.90  # 10% pullback for neutral/negative
+        sentiment_text = "Neutral/Bearish - Deeper pullback possible"
+        sentiment_factor = "deeper"
     
     final_entry = weighted_entry * entry_adjustment
     
-    # Calculate estimated time to pullback (in days)
-    if rsi > 50:
-        estimated_days = 2  # Quick pullback
+    # FINAL SANITY CHECK - Cap at realistic levels
+    # Determine volatility-based max pullback
+    if atr_pct > 5:  # High volatility stock (like crypto, tech)
+        max_allowed_pullback = 18
+    elif atr_pct > 3:  # Medium volatility
+        max_allowed_pullback = 12
+    else:  # Low volatility
+        max_allowed_pullback = 8
+    
+    actual_pullback_pct = ((current_price - final_entry) / current_price) * 100
+    
+    if actual_pullback_pct > max_allowed_pullback:
+        # Cap the pullback
+        final_entry = current_price * (1 - max_allowed_pullback / 100)
+        actual_pullback_pct = max_allowed_pullback
+    
+    # Calculate estimated time to pullback (in days) - FIXED LOGIC
+    # Lower RSI = already weaker = may take longer to pullback further
+    # Higher RSI = overbought = faster pullback
+    if rsi > 65:
+        estimated_days = 1  # Very overbought - immediate pullback
+    elif rsi > 55:
+        estimated_days = 2  # Overbought - quick pullback
     elif rsi > 45:
-        estimated_days = 3  # Moderate pullback
+        estimated_days = 3  # Neutral - moderate timing
+    elif rsi > 35:
+        estimated_days = 4  # Slightly weak - may drift lower slowly
     else:
-        estimated_days = 5  # Deeper, longer pullback
+        estimated_days = 5  # Already weak - needs time to reverse
     
     return {
         'estimated_entry': round(final_entry, 2),
@@ -729,10 +766,12 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
             'second_support': round(bollinger_entry, 2),
             'deep_support': round(max_pain_entry, 2) if max_pain_entry else round(bollinger_entry * 0.97, 2)
         },
-        'estimated_pullback_pct': round(((current_price - final_entry) / current_price) * 100, 1),
+        'estimated_pullback_pct': round(actual_pullback_pct, 1),
         'estimated_days_to_pullback': estimated_days,
         'sentiment_text': sentiment_text,
-        'current_price': current_price
+        'sentiment_factor': sentiment_factor,
+        'current_price': current_price,
+        'atr_pct': round(atr_pct, 1)
     }
 
 # --- GOOGLE SHEETS CONNECTION ---
@@ -1514,7 +1553,7 @@ if st.session_state.price and st.session_state.expiries:
                     f"${pullback_data['estimated_entry']:.2f}",
                     delta=f"-{pullback_data['estimated_pullback_pct']:.1f}% from current"
                 )
-                st.caption(f"⏰ Expected in ~{pullback_data['estimated_days_to_pullback']} trading days")
+                st.caption(f"⏰ Expected in ~{abs(pullback_data['estimated_days_to_pullback'])} trading days")
                 st.caption(f"📊 Confidence: {pullback_data.get('confidence', 'Medium')}")
             
             with col_e2:
