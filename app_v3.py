@@ -166,16 +166,17 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
 # NEW FORECASTING FUNCTIONS (Phase 5.5)
 # ========================
 
-def forecast_5day_price(current_option_price, delta, gamma, theta, vega, current_iv, forecast_iv_change=0, days=5):
+def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma, theta, vega, current_iv, forecast_iv_change=0, days=5, expected_stock_move_pct=0.03):
     """
-    Calculate expected option price in 5 days using Greeks.
+    Calculate expected option price in 5 days using proper options math.
     
-    Parameters:
-    - current_option_price: Current mid price
-    - delta, gamma, theta, vega: Option Greeks
-    - current_iv: Current implied volatility
-    - forecast_iv_change: Expected IV change (as decimal, e.g., 0.05 for +5%)
-    - days: Forecast horizon (default 5)
+    Options amplify stock moves through delta and gamma convexity.
+    Expected 5-day stock move: 3% (typical for average volatility stock)
+    
+    Example:
+    - Stock: $100, Option: $5, Delta: 0.50
+    - Leverage = 0.50 × (100/5) = 10x
+    - 3% stock move → 30% option move ($5 → $6.50)
     
     Returns:
     - expected_price: Expected price in 5 days
@@ -183,74 +184,94 @@ def forecast_5day_price(current_option_price, delta, gamma, theta, vega, current
     - price_lower: Lower bound (80% confidence)
     - theta_decay: Total theta decay in dollars
     - iv_impact: Impact of IV change in dollars
+    - leverage: Effective leverage factor
     """
     try:
-        # Theta decay (negative, so we subtract absolute value)
+        # Theta decay (daily decay over 5 days)
         theta_decay = abs(theta) * days
         
-        # IV impact
+        # IV impact (if volatility changes)
         iv_impact = vega * forecast_iv_change
         
-        # Delta/Gamma impact - assuming 2% stock move (typical for 5 days)
-        expected_stock_move_pct = 0.02  # 2% expected move over 5 days
-        expected_price_change = (delta * expected_stock_move_pct * current_option_price) + \
-                                 (0.5 * gamma * (expected_stock_move_pct ** 2) * current_option_price)
+        # ========== CORRECT LEVERAGE CALCULATION ==========
+        # Actual options leverage: delta × (stock_price / option_price)
+        if current_option_price > 0 and stock_price > 0:
+            actual_leverage = delta * (stock_price / current_option_price)
+            actual_leverage = min(max(actual_leverage, 2.0), 30.0)  # Cap between 2x and 30x
+        else:
+            actual_leverage = 8.0  # Default for ATM options
+        
+        # Expected option percentage move
+        expected_option_move_pct = actual_leverage * expected_stock_move_pct
+        
+        # Dollar move
+        expected_dollar_move = current_option_price * (expected_option_move_pct / 100)
+        
+        # Gamma convexity (adds more for larger deltas and ATM options)
+        try:
+            moneyness = stock_price / strike if strike > 0 else 1.0
+            if moneyness > 0.95:  # ATM or slightly ITM
+                gamma_boost = 1.0 + (gamma * stock_price)
+                gamma_boost = min(max(gamma_boost, 1.1), 1.5)  # 10-50% boost
+            else:  # OTM
+                gamma_boost = 1.1  # Lower boost for OTM
+        except:
+            gamma_boost = 1.2
+        
+        expected_price_change = expected_dollar_move * gamma_boost
         
         # Total expected price
         expected_price = current_option_price - theta_decay + iv_impact + expected_price_change
-        expected_price = max(expected_price, 0.01)  # Floor at $0.01
+        expected_price = max(expected_price, 0.05)
         
-        # 80% confidence bounds (using 1.28 sigma, but with fat-tail adjustment)
-        # Options have kurtosis, so we use 1.5x for wider bounds
-        uncertainty_factor = 1.5 * expected_stock_move_pct * current_option_price
+        # 80% confidence bounds (wider for options due to convexity)
+        uncertainty_factor = abs(expected_price_change) * 0.8
         price_upper = expected_price + uncertainty_factor
-        price_lower = max(expected_price - uncertainty_factor, 0.01)
+        price_lower = max(expected_price - uncertainty_factor, 0.05)
         
-        return round(expected_price, 3), round(price_upper, 3), round(price_lower, 3), round(theta_decay, 3), round(iv_impact, 3)
-    except Exception:
-        return current_option_price, current_option_price, current_option_price, 0, 0
+        return (round(expected_price, 3), round(price_upper, 3), round(price_lower, 3), 
+                round(theta_decay, 3), round(iv_impact, 3), round(actual_leverage, 1))
+    except Exception as e:
+        return current_option_price, current_option_price, current_option_price, 0, 0, 0
 
-def probability_hit_target(current_option_price, target_price, days, atr_pct, current_price, option_delta, num_sims=500):
+def probability_hit_target(current_option_price, target_price, days, option_iv, num_sims=500):
     """
-    Calculate probability of hitting profit target within specified days using ATR-based simulation.
+    Calculate probability of hitting profit target using OPTION implied volatility.
     
-    Returns probability between 0 and 1.
+    Option IV is typically 30-80%, correctly capturing option price behavior.
     """
     try:
         if target_price <= current_option_price:
             return 1.0
         
-        # Daily volatility from ATR (convert to percentage)
-        daily_vol = (atr_pct / 100) / np.sqrt(252)  # ATR% to daily standard deviation
+        # Daily option volatility from IV
+        daily_vol = option_iv / np.sqrt(252)
         
-        # Drift assumption: slightly bullish if target > current
-        drift = 0.05 / 252  # 5% annual drift assumption
+        # No drift assumption for options
+        drift = 0.0
         
-        # Vectorized Monte Carlo simulation
-        np.random.seed(42)  # For reproducibility
+        # Vectorized Monte Carlo
+        np.random.seed(42)
         returns = np.random.normal(drift, daily_vol, (num_sims, days))
         price_paths = current_option_price * np.exp(np.cumsum(returns, axis=1))
         
-        # Check if any path hits target
         hit_target = np.any(price_paths >= target_price, axis=1)
         probability = np.mean(hit_target)
         
         return round(probability, 3)
     except Exception:
-        return 0.5
+        return 0.3
 
-def probability_hit_stop(current_option_price, stop_price, days, atr_pct, current_price, option_delta, num_sims=500):
+def probability_hit_stop(current_option_price, stop_price, days, option_iv, num_sims=500):
     """
-    Calculate probability of hitting stop loss within specified days.
-    
-    Returns probability between 0 and 1.
+    Calculate probability of hitting stop loss using OPTION implied volatility.
     """
     try:
         if stop_price >= current_option_price:
             return 1.0
         
-        daily_vol = (atr_pct / 100) / np.sqrt(252)
-        drift = 0.05 / 252
+        daily_vol = option_iv / np.sqrt(252)
+        drift = 0.0
         
         np.random.seed(42)
         returns = np.random.normal(drift, daily_vol, (num_sims, days))
@@ -261,7 +282,7 @@ def probability_hit_stop(current_option_price, stop_price, days, atr_pct, curren
         
         return round(probability, 3)
     except Exception:
-        return 0.5
+        return 0.3
 
 def estimate_iv_percentile(current_iv, hv):
     """
@@ -2932,12 +2953,12 @@ if st.session_state.price and st.session_state.expiries:
                         st.markdown("#### 📊 Quantitative Forecast (5-Day)")
                         
                         # Calculate forecasts
-                        expected_price, price_upper, price_lower, theta_decay_5d, iv_impact = forecast_5day_price(
-                            option_price, delta_calc, gamma, theta, 0, current_iv, 0, 5
+                        expected_price, price_upper, price_lower, theta_decay_5d, iv_impact, leverage = forecast_5day_price(
+                            option_price, stock_price, strike, delta_calc, gamma, theta, 0, current_iv, 0, 5, 0.03
                         )
                         
-                        prob_target = probability_hit_target(option_price, target, 5, atr_pct, stock_price if stock_price else S, delta_calc)
-                        prob_stop = probability_hit_stop(option_price, stop, 5, atr_pct, stock_price if stock_price else S, delta_calc)
+                        prob_target = probability_hit_target(option_price, target, 5, current_iv)
+                        prob_stop = probability_hit_stop(option_price, stop, 5, current_iv)
                         
                         iv_percentile = estimate_iv_percentile(current_iv, calculate_hv(stock_hist) if not stock_hist.empty else 20)
                         
