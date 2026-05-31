@@ -1120,10 +1120,11 @@ with st.sidebar:
     st.session_state.stop_loss_pct = stop_loss_pct
     
     st.divider()
-    st.subheader("🔍 Workspace Adjuster")
     
-    # Show workspace adjuster ONLY when expiries are loaded
+    # --- FIXED: Workspace Adjuster header now INSIDE the conditional ---
     if st.session_state.expiries and len(st.session_state.expiries) > 0:
+        st.subheader("🔍 Workspace Adjuster")
+        
         # Find index of current selection
         current_index = 0
         if st.session_state.last_selected_expiry and st.session_state.last_selected_expiry in st.session_state.expiries:
