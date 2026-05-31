@@ -1346,15 +1346,19 @@ def get_current_option_price(ticker, expiry, strike):
             row = option_row.iloc[0]
             mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
             iv = row['impliedVolatility']
-            # Fix: Get gamma and theta from the row (they exist in yfinance)
-            gamma = row.get('gamma', 0)
-            theta = row.get('theta', 0)
-            # If theta is still 0, estimate it
-            if theta == 0 and iv > 0 and mid > 0:
-                # Rough theta estimate: ~0.5-1% of premium per day for 30-45 DTE
-                days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
-                if days_to_expiry > 0:
-                    theta = -mid * 0.015  # 1.5% of premium per day as rough estimate
+            
+            # Get current stock price
+            stock_price = get_cached_current_price(ticker)
+            if stock_price is None:
+                stock_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
+            
+            # Calculate days to expiry
+            days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
+            T_years = max(days_to_expiry, 1) / 365
+            
+            # Calculate gamma and theta using Black-Scholes
+            _, gamma, theta, _ = calculate_greeks(stock_price, float(strike), T_years, 0.05, iv)
+            
             return mid, iv, gamma, theta
         return None, None, None, None
     except Exception as e:
