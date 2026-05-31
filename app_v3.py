@@ -214,9 +214,6 @@ def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma,
         expected_price = current_option_price - theta_decay + iv_impact + expected_price_change
         expected_price = max(expected_price, 0.05)
         
-        # Debug (remove after fixing)
-        # st.caption(f"🔍 FIXED: leverage={actual_leverage:.1f}x, stock_move={expected_stock_move_decimal*100:.1f}%, option_move={expected_option_move_pct_display:.1f}%")
-        
         # 80% confidence bounds
         uncertainty_factor = abs(expected_price_change) * 0.8
         price_upper = expected_price + uncertainty_factor
@@ -1352,10 +1349,7 @@ def get_current_option_price(ticker, expiry, strike):
             # FIX: calculate_greeks returns (delta, gamma, theta, vega) in THAT order
             # Your current call might be misaligned
             delta, gamma, theta, vega = calculate_greeks(stock_price, float(strike), T_years, 0.05, iv)
-            
-            # Debug: Print to confirm
-            # st.caption(f"🔍 GREEKS: delta={delta}, gamma={gamma}, theta={theta}, vega={vega}")
-            
+                        
             return mid, iv, gamma, theta
         return None, None, None, None
     except Exception as e:
@@ -3015,33 +3009,11 @@ if st.session_state.price and st.session_state.expiries:
                         
                         # Sub-section A: Quantitative Forecast
                         st.markdown("#### 📊 Quantitative Forecast (5-Day)")
-
-                        # ========== DEBUG: Check input values before forecast ==========
-                        st.caption(f"🔍 PRE-FORECAST CHECK:")
-                        st.caption(f"   option_price = {option_price}")
-                        st.caption(f"   stock_price = {stock_price}")
-                        st.caption(f"   strike = {strike}")
-                        st.caption(f"   delta_calc = {delta_calc}")
-                        st.caption(f"   gamma = {gamma}")
-                        st.caption(f"   theta = {theta}")
-                        st.caption(f"   current_iv = {current_iv}")
-                        st.caption(f"   days_left = {days_left}")
-                        # ================================================================
-                        
-                        st.caption(f"🔍 INPUT CHECK: expected_stock_move_pct = 0.03 (hardcoded)")
-                        st.caption(f"🔍 INPUT CHECK: option_price={option_price}, stock_price={stock_price}, delta={delta_calc}, gamma={gamma}")
-                        st.caption(f"🔍 INPUT CHECK: This should produce POSITIVE expected move for ITM call")
                         
                         # Calculate forecasts
                         expected_price, price_upper, price_lower, theta_decay_5d, iv_impact, leverage = forecast_5day_price(
                             option_price, stock_price, strike, delta_calc, gamma, theta, 0, current_iv, 0, 5, 0.03
                         )
-
-                        # ========== DEBUG: Add this block ==========
-                        st.caption(f"🔍 DEBUG: Current Price=${option_price:.2f}, Target=${target:.2f}, Stop=${stop:.2f}")
-                        st.caption(f"🔍 DEBUG: Stock=${stock_price:.2f}, Strike=${strike:.2f}, Delta={delta_calc:.3f}, Theta={theta:.4f}, IV={current_iv:.3f}")
-                        st.caption(f"🔍 DEBUG: Leverage={leverage:.1f}x, Expected Move=${expected_price - option_price:+.2f} ({((expected_price/option_price)-1)*100:.1f}%)")
-                        # ==========================================
                         
                         prob_target = probability_hit_target(option_price, target, 5, current_iv)
                         prob_stop = probability_hit_stop(option_price, stop, 5, current_iv)
