@@ -1167,7 +1167,7 @@ if fetch_btn:
     st.session_state.global_speculative = None
     st.session_state.last_selected_expiry = None
     st.session_state.data_fetched = True
-    st.rerun()
+    
     try:
         hist = get_cached_stock_history(ticker_input, "100d")
         
@@ -1245,6 +1245,9 @@ if fetch_btn:
 
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
+
+    # FORCE A RERUN AFTER SETTING ALL SESSION STATE VARIABLES
+    st.rerun()
 
 # --- MAIN DASHBOARD VIEW ---
 if st.session_state.price and st.session_state.expiries:
