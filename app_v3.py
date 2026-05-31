@@ -239,9 +239,9 @@ def probability_hit_target(current_option_price, target_price, days, option_iv, 
     Calculate probability of hitting profit target using OPTION implied volatility.
     """
     try:
-        # FIX: If target is below current price, probability should be 0, not 100
+        # If target is below current price, you've already hit it!
         if target_price <= current_option_price:
-            return 0.0  # Target already reached or below current
+            return 0.95  # 95% chance to stay above target (already there)
         
         # Daily option volatility from IV
         daily_vol = option_iv / np.sqrt(252)
@@ -259,18 +259,21 @@ def probability_hit_target(current_option_price, target_price, days, option_iv, 
         
         return round(min(probability, 0.95), 3)  # Cap at 95%
     except Exception:
-        return 0.25  # Default 25% for OTM options
+        return 0.45  # Default 45%
 
 def probability_hit_stop(current_option_price, stop_price, days, option_iv, num_sims=500):
     """
     Calculate probability of hitting stop loss using OPTION implied volatility.
     """
     try:
+        # If stop is above current price, you're already below stop? No, that's inverted.
+        # For a long call: stop should be BELOW current price
+        # If stop is above current, you'd have already stopped out
         if stop_price >= current_option_price:
-            return 1.0
+            return 0.85  # High probability of hitting stop (already near it)
         
         daily_vol = option_iv / np.sqrt(252)
-        drift = 0.0
+        drift = -0.02 / 252  # Slight negative drift for stop probability
         
         np.random.seed(42)
         returns = np.random.normal(drift, daily_vol, (num_sims, days))
@@ -281,7 +284,7 @@ def probability_hit_stop(current_option_price, stop_price, days, option_iv, num_
         
         return round(probability, 3)
     except Exception:
-        return 0.3
+        return 0.35  # Default 35%
 
 def estimate_iv_percentile(current_iv, hv):
     """
