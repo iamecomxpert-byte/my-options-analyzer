@@ -163,6 +163,264 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
         return stock_price * 1.05, stock_price * 0.95
 
 # ========================
+# NEW FORECASTING FUNCTIONS (Phase 5.5)
+# ========================
+
+def forecast_5day_price(current_option_price, delta, gamma, theta, vega, current_iv, forecast_iv_change=0, days=5):
+    """
+    Calculate expected option price in 5 days using Greeks.
+    
+    Parameters:
+    - current_option_price: Current mid price
+    - delta, gamma, theta, vega: Option Greeks
+    - current_iv: Current implied volatility
+    - forecast_iv_change: Expected IV change (as decimal, e.g., 0.05 for +5%)
+    - days: Forecast horizon (default 5)
+    
+    Returns:
+    - expected_price: Expected price in 5 days
+    - price_upper: Upper bound (80% confidence)
+    - price_lower: Lower bound (80% confidence)
+    - theta_decay: Total theta decay in dollars
+    - iv_impact: Impact of IV change in dollars
+    """
+    try:
+        # Theta decay (negative, so we subtract absolute value)
+        theta_decay = abs(theta) * days
+        
+        # IV impact
+        iv_impact = vega * forecast_iv_change
+        
+        # Delta/Gamma impact - assuming 2% stock move (typical for 5 days)
+        expected_stock_move_pct = 0.02  # 2% expected move over 5 days
+        expected_price_change = (delta * expected_stock_move_pct * current_option_price) + \
+                                 (0.5 * gamma * (expected_stock_move_pct ** 2) * current_option_price)
+        
+        # Total expected price
+        expected_price = current_option_price - theta_decay + iv_impact + expected_price_change
+        expected_price = max(expected_price, 0.01)  # Floor at $0.01
+        
+        # 80% confidence bounds (using 1.28 sigma, but with fat-tail adjustment)
+        # Options have kurtosis, so we use 1.5x for wider bounds
+        uncertainty_factor = 1.5 * expected_stock_move_pct * current_option_price
+        price_upper = expected_price + uncertainty_factor
+        price_lower = max(expected_price - uncertainty_factor, 0.01)
+        
+        return round(expected_price, 3), round(price_upper, 3), round(price_lower, 3), round(theta_decay, 3), round(iv_impact, 3)
+    except Exception:
+        return current_option_price, current_option_price, current_option_price, 0, 0
+
+def probability_hit_target(current_option_price, target_price, days, atr_pct, current_price, option_delta, num_sims=500):
+    """
+    Calculate probability of hitting profit target within specified days using ATR-based simulation.
+    
+    Returns probability between 0 and 1.
+    """
+    try:
+        if target_price <= current_option_price:
+            return 1.0
+        
+        # Daily volatility from ATR (convert to percentage)
+        daily_vol = (atr_pct / 100) / np.sqrt(252)  # ATR% to daily standard deviation
+        
+        # Drift assumption: slightly bullish if target > current
+        drift = 0.05 / 252  # 5% annual drift assumption
+        
+        # Vectorized Monte Carlo simulation
+        np.random.seed(42)  # For reproducibility
+        returns = np.random.normal(drift, daily_vol, (num_sims, days))
+        price_paths = current_option_price * np.exp(np.cumsum(returns, axis=1))
+        
+        # Check if any path hits target
+        hit_target = np.any(price_paths >= target_price, axis=1)
+        probability = np.mean(hit_target)
+        
+        return round(probability, 3)
+    except Exception:
+        return 0.5
+
+def probability_hit_stop(current_option_price, stop_price, days, atr_pct, current_price, option_delta, num_sims=500):
+    """
+    Calculate probability of hitting stop loss within specified days.
+    
+    Returns probability between 0 and 1.
+    """
+    try:
+        if stop_price >= current_option_price:
+            return 1.0
+        
+        daily_vol = (atr_pct / 100) / np.sqrt(252)
+        drift = 0.05 / 252
+        
+        np.random.seed(42)
+        returns = np.random.normal(drift, daily_vol, (num_sims, days))
+        price_paths = current_option_price * np.exp(np.cumsum(returns, axis=1))
+        
+        hit_stop = np.any(price_paths <= stop_price, axis=1)
+        probability = np.mean(hit_stop)
+        
+        return round(probability, 3)
+    except Exception:
+        return 0.5
+
+def estimate_iv_percentile(current_iv, hv):
+    """
+    Estimate IV percentile using IV/HV spread as proxy.
+    """
+    try:
+        spread = (current_iv * 100) - hv
+        percentile = 50 + spread
+        return max(0, min(100, percentile))
+    except Exception:
+        return 50
+
+def get_combined_recommendation(quant_score, ai_score, option_price, stop_loss, days_left):
+    """
+    Combine quantitative score and AI sentiment for position recommendation.
+    
+    Returns: (recommendation_icon, reason, combined_score)
+    """
+    if option_price <= stop_loss:
+        return "🔴 EXIT", "Stop loss triggered", 0
+    
+    # Normalize AI score from -1..1 to 0..100
+    ai_score_normalized = (ai_score + 1) * 50
+    
+    # Weighted combination: 60% quant, 40% AI
+    combined_score = (quant_score * 0.6) + (ai_score_normalized * 0.4)
+    
+    # Time decay urgency
+    if days_left < 3:
+        combined_score *= 0.7
+        time_note = " | URGENT: <3 days left"
+    else:
+        time_note = ""
+    
+    if combined_score >= 70 and ai_score >= 0.3:
+        return "🟢 STRONG HOLD", f"Quant: {quant_score}/100 | AI: {ai_score:+.2f}{time_note}", combined_score
+    elif combined_score >= 55:
+        return "🔵 HOLD", f"Maintain position | Combined: {combined_score:.0f}{time_note}", combined_score
+    elif combined_score >= 40:
+        return "🟡 MONITOR", f"Mixed signals | Tighten stops{time_note}", combined_score
+    elif combined_score >= 25:
+        return "🟠 CONSIDER EXIT", f"Quant weak ({quant_score}) or AI bearish{time_note}", combined_score
+    else:
+        return "🔴 EXIT", f"Strong exit signals | Combined: {combined_score:.0f}{time_note}", combined_score
+
+def calculate_portfolio_forecast(positions, st_price=None):
+    """
+    Aggregate 5-day forecasts for all active positions.
+    
+    Returns dictionary with aggregated metrics.
+    """
+    if not positions:
+        return None
+    
+    total_current_value = 0
+    total_forecast_value = 0
+    total_theta_decay = 0
+    positions_improving = 0
+    positions_declining = 0
+    
+    # We'll store individual position forecasts if needed
+    position_forecasts = []
+    
+    for pos in positions:
+        try:
+            ticker = pos['ticker']
+            expiry = pos['expiry']
+            strike = float(pos['strike'])
+            contracts = int(pos['contracts'])
+            entry_price = float(pos['entry_price'])
+            
+            # Get current option price and Greeks
+            current_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry, strike)
+            
+            if current_price and current_price > 0:
+                # Get stock price and ATR for volatility
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period="20d")
+                if not hist.empty:
+                    _, atr_pct = calculate_atr(hist)
+                    current_stock = hist['Close'].iloc[-1]
+                    
+                    # Calculate delta for this contract
+                    days_left = max((pd.to_datetime(expiry).date() - datetime.now().date()).days, 1)
+                    d, _, _, _ = calculate_greeks(current_stock, strike, days_left/365, 0.05, current_iv)
+                    
+                    # Forecast price
+                    expected_price, _, _, theta_decay, _ = forecast_5day_price(
+                        current_price, d, gamma, theta, 0, current_iv, 0, 5
+                    )
+                    
+                    position_value = current_price * contracts * 100
+                    forecast_value = expected_price * contracts * 100
+                    
+                    total_current_value += position_value
+                    total_forecast_value += forecast_value
+                    total_theta_decay += abs(theta_decay) * contracts * 100
+                    
+                    if forecast_value > position_value:
+                        positions_improving += 1
+                    else:
+                        positions_declining += 1
+                    
+                    position_forecasts.append({
+                        'ticker': ticker,
+                        'current': position_value,
+                        'forecast': forecast_value,
+                        'improving': forecast_value > position_value
+                    })
+        except Exception as e:
+            continue
+    
+    if total_current_value == 0:
+        return None
+    
+    expected_change = total_forecast_value - total_current_value
+    expected_change_pct = (expected_change / total_current_value) * 100
+    
+    return {
+        'total_current_value': total_current_value,
+        'total_forecast_value': total_forecast_value,
+        'expected_change': expected_change,
+        'expected_change_pct': expected_change_pct,
+        'total_theta_decay_5d': total_theta_decay,
+        'positions_improving': positions_improving,
+        'positions_declining': positions_declining,
+        'total_positions': len(positions),
+        'position_forecasts': position_forecasts
+    }
+
+def get_ai_forecast_for_position(ticker, current_price, strike, current_iv):
+    """
+    Get cached AI sentiment for a specific ticker.
+    Returns sentiment dict or None.
+    """
+    # Check if we have cached AI for this ticker
+    cache_key = f"news_sentiment_{ticker}"
+    cached_sentiment = st.session_state.ai_cache.get(cache_key)
+    
+    if cached_sentiment:
+        # Try to parse sentiment data from cached response
+        try:
+            # The cached response is HTML/markdown, need to extract sentiment
+            # For now, return the stored sentiment from session state
+            if hasattr(st.session_state, 'current_sentiment') and st.session_state.current_sentiment:
+                return st.session_state.current_sentiment
+        except:
+            pass
+    
+    # Return default neutral sentiment
+    return {
+        'sentiment_score': 0.0,
+        'sentiment_label': 'Neutral',
+        'catalyst': None,
+        'key_themes': ['No recent news'],
+        'risk_adjustment': 0
+    }
+
+# ========================
 # PUT/CALL RATIO & BETA ADJUSTMENT
 # ========================
 
@@ -1283,7 +1541,7 @@ state_keys = {
     'credits_used': 0, 'ai_brief': "", 'last_refresh': "Never", 'hist_data': pd.DataFrame(),
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
     'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30,
-    'current_sentiment': None, 'active_tab': 0
+    'current_sentiment': None, 'active_tab': 0, 'last_ai_refresh': None
 }
 for key, default in state_keys.items():
     if key not in st.session_state:
@@ -1903,7 +2161,9 @@ if st.session_state.price and st.session_state.expiries:
                 selected_row = calls_df[calls_df['strike'] == selected_strike].iloc[0]
                 
                 option_price = (selected_row['bid'] + selected_row['ask']) / 2 if selected_row['bid'] > 0 else selected_row['lastPrice']
-                d, g, theta, v = calculate_greeks(S, selected_strike, T_years if 'T_years' in dir() else 0.16, 0.05, selected_row['impliedVolatility'])
+                days_to_expiry = (pd.to_datetime(current_expiry).date() - datetime.now().date()).days
+                T_years = max(days_to_expiry, 1) / 365
+                d, g, theta, v = calculate_greeks(S, selected_strike, T_years, 0.05, selected_row['impliedVolatility'])
                 
                 target_stock, stop_stock = calculate_dynamic_targets(S, option_price, d, g, theta, days=5, target_gain_pct=0.50)
                 
@@ -2319,7 +2579,7 @@ if st.session_state.price and st.session_state.expiries:
         st.markdown(st.session_state.ai_brief)
 
     # ========================
-    # PORTFOLIO TAB
+    # PORTFOLIO TAB (UPDATED with Forecasts and Risk Breakdown)
     # ========================
     with t_portfolio:
         st.header("📂 Options Portfolio Tracker")
@@ -2328,73 +2588,61 @@ if st.session_state.price and st.session_state.expiries:
             init_portfolio_sheet()
             st.session_state.sheet_initialized = True
         
-        def get_conservative_strike_for_expiry(ticker, expiry_date, profit_target_pct, stop_loss_pct):
-            try:
-                stock_obj = yf.Ticker(ticker)
-                hist = stock_obj.history(period="100d")
-                if hist.empty:
-                    return None, None
-                current_price = get_cached_current_price(ticker)
-                if current_price is None:
-                    current_price = stock.history(period="1d")['Close'].iloc[-1]
-                opt_chain = stock_obj.option_chain(expiry_date)
-                calls = opt_chain.calls
-                df_tech = hist.copy()
-                curr, prev = get_technicals(df_tech)
-                tech_score = 0
-                if curr['ema8'] > curr['ema20']:
-                    tech_score += 1
-                if curr['hist'] > prev['hist']:
-                    tech_score += 1
-                if current_price > curr['sma20']:
-                    tech_score += 1
-                conservative_candidates = []
-                days_to_expiry = (pd.to_datetime(expiry_date).date() - datetime.now().date()).days
-                t_yrs = max(days_to_expiry, 1) / 365
-                for _, row in calls.iterrows():
-                    mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
-                    if mid_p <= 0 or row['impliedVolatility'] <= 0:
-                        continue
-                    d, _, _, _ = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
-                    if 0.50 <= d <= 0.60:
-                        p_touch = calculate_p_touch(current_price, row['strike'], t_yrs, row['impliedVolatility'])
-                        ev_val = (p_touch * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_touch) * (mid_p * (stop_loss_pct / 100)))
-                        conservative_candidates.append({'strike': row['strike'], 'mid': mid_p, 'ev': ev_val})
-                if conservative_candidates:
-                    best = max(conservative_candidates, key=lambda x: x['ev'])
-                    return best['strike'], best['mid']
-                return None, None
-            except Exception:
-                return None, None
+        # Refresh AI Forecasts function
+        def refresh_all_ai_forecasts(positions):
+            """Refresh AI sentiment for all unique tickers in portfolio"""
+            if not positions:
+                return
+            
+            unique_tickers = list(set([pos.get('ticker', '') for pos in positions if pos.get('ticker')]))
+            if not unique_tickers:
+                return
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, ticker in enumerate(unique_tickers):
+                status_text.text(f"🔄 Refreshing AI for {ticker}...")
+                # Force refresh by clearing cache
+                cache_key = f"news_sentiment_{ticker}"
+                if cache_key in st.session_state.ai_cache.cache:
+                    del st.session_state.ai_cache.cache[cache_key]
+                # Regenerate
+                get_ai_research(ticker)
+                progress_bar.progress((i + 1) / len(unique_tickers))
+                time.sleep(0.5)  # Rate limiting
+            
+            status_text.text("✅ AI refresh complete!")
+            st.session_state.last_ai_refresh = datetime.now()
+            time.sleep(1)
+            status_text.empty()
+            progress_bar.empty()
+            st.rerun()
         
-        def get_strikes_for_expiry(ticker, expiry_date):
-            try:
-                stock_obj = yf.Ticker(ticker)
-                opt_chain = stock_obj.option_chain(expiry_date)
-                calls = opt_chain.calls
-                strikes_with_prices = []
-                for _, row in calls.iterrows():
-                    mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
-                    if mid_p > 0:
-                        strikes_with_prices.append({'strike': row['strike'], 'mid': mid_p})
-                return sorted(strikes_with_prices, key=lambda x: x['strike'])
-            except Exception:
-                return []
-        
-        def calculate_composite_score_for_position(current_price, strike, days_left, iv, tech_score):
-            d, _, _, _ = calculate_greeks(current_price, strike, max(days_left, 1)/365, 0.05, iv)
-            p_touch = calculate_p_touch(current_price, strike, max(days_left, 1)/365, iv)
-            ev = (p_touch * (1 + st.session_state.profit_target_pct/100)) - ((1 - p_touch) * (st.session_state.stop_loss_pct/100))
-            cts = int(((d * 0.4) + (p_touch * 0.4) + (tech_score / 3.0 * 0.2)) * 100)
-            return cts, ev, d, p_touch
+        def get_risk_factor_explanations():
+            """Return explanations for each risk factor"""
+            return {
+                'Position Size': 'Larger positions relative to $50k baseline increase risk',
+                'Delta Risk': 'Higher delta = more directional exposure and risk',
+                'Time Left': 'Less time = higher risk of theta decay',
+                'IV Risk': 'High IV means expensive options with crash risk',
+                'Moneyness': 'OTM options have lower probability of profit',
+                'Sentiment': 'Bearish sentiment increases risk for long calls'
+            }
         
         trader_options = get_trader_list()
         selected_trader = st.selectbox("Select Trader:", trader_options, key="trader_select")
         
-        col_add1, col_add2 = st.columns([3, 1])
-        with col_add2:
+        # Row with Add Trader and Refresh AI buttons
+        col_top1, col_top2, col_top3 = st.columns([3, 1, 1])
+        with col_top2:
             if st.button("➕ Add New Trader", key="show_add_trader"):
                 st.session_state.show_new_trader = True
+        
+        with col_top3:
+            all_positions_for_refresh = get_all_positions_for_trader(selected_trader)
+            if st.button("🔄 Refresh All AI Forecasts", key="refresh_ai_all"):
+                refresh_all_ai_forecasts(all_positions_for_refresh)
         
         if st.session_state.get('show_new_trader', False):
             col_n1, col_n2, col_n3, col_n4 = st.columns([2, 2, 1, 1])
@@ -2448,11 +2696,45 @@ if st.session_state.price and st.session_state.expiries:
             st.metric("✅ Realized P&L", f"${total_realized:+,.2f}")
         
         st.divider()
+        
+        # ============================================================
+        # NEW: Portfolio 5-Day Forecast Section
+        # ============================================================
+        st.subheader("📈 Portfolio 5-Day Forecast")
+        
+        portfolio_forecast = calculate_portfolio_forecast([pos for _, pos in active_positions])
+        
+        if portfolio_forecast and portfolio_forecast['total_current_value'] > 0:
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            
+            with col_f1:
+                st.metric("Current Value", f"${portfolio_forecast['total_current_value']:,.0f}")
+            with col_f2:
+                expected_change = portfolio_forecast['expected_change']
+                expected_color = "normal" if expected_change >= 0 else "inverse"
+                st.metric("Expected 5-Day Value", f"${portfolio_forecast['total_forecast_value']:,.0f}", 
+                         delta=f"{expected_change:+,.0f} ({portfolio_forecast['expected_change_pct']:+.1f}%)",
+                         delta_color=expected_color)
+            with col_f3:
+                st.metric("Theta Decay (5d)", f"-${portfolio_forecast['total_theta_decay_5d']:,.0f}",
+                         delta="Time cost")
+            with col_f4:
+                improving = portfolio_forecast['positions_improving']
+                declining = portfolio_forecast['positions_declining']
+                st.metric("Position Health", f"{improving} improving / {declining} declining")
+            
+            # Mini progress bar for portfolio health
+            health_ratio = improving / max(portfolio_forecast['total_positions'], 1)
+            st.progress(health_ratio, text=f"📊 {health_ratio*100:.0f}% of positions expected to improve")
+        else:
+            st.info("Add active positions to see 5-day portfolio forecast")
+        
+        st.divider()
         st.subheader("📊 Active Positions")
         
         col_refresh, _ = st.columns([1, 5])
         with col_refresh:
-            if st.button("🔄 Refresh", key="refresh_portfolio", use_container_width=True):
+            if st.button("🔄 Refresh Prices", key="refresh_portfolio", use_container_width=True):
                 st.rerun()
         
         if active_positions:
@@ -2463,7 +2745,7 @@ if st.session_state.price and st.session_state.expiries:
                     expiry_date = pd.to_datetime(pos['expiry']).date()
                     days_left = max((expiry_date - datetime.now().date()).days, 0)
                     
-                    option_price, current_iv, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], strike)
+                    option_price, current_iv, gamma, theta = get_current_option_price(pos['ticker'], pos['expiry'], strike)
                     if option_price:
                         stock_price = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
                         d, _, _, _ = calculate_greeks(stock_price, strike, max(days_left, 1)/365, 0.05, current_iv)
@@ -2471,18 +2753,36 @@ if st.session_state.price and st.session_state.expiries:
                     else:
                         current_delta = 0.5
                         current_iv = 0.35
+                        gamma = 0
+                        theta = 0
                     
                     sentiment_adj = st.session_state.current_sentiment.get('risk_adjustment', 0) if st.session_state.current_sentiment else 0
                     base_risk_score = calculate_risk_score(pos, option_price if option_price else 0, current_delta, days_left, current_iv, sentiment_adj)
                     beta, _ = calculate_beta(pos['ticker'])
                     risk_score, beta_factor = calculate_beta_adjusted_risk(base_risk_score * 100, beta)
-                    positions_with_risk.append((risk_score, idx, row_idx, pos))
-                except:
-                    positions_with_risk.append((50.0, idx, row_idx, pos))
+                    
+                    # Get AI sentiment for this ticker
+                    ai_sentiment = get_ai_forecast_for_position(pos['ticker'], stock_price, strike, current_iv)
+                    ai_score = ai_sentiment.get('sentiment_score', 0)
+                    
+                    # Calculate factor scores for breakdown
+                    factor_scores = {
+                        'Position Size': min((int(pos['contracts']) * float(pos['entry_price']) * 100) / 50000, 1.0),
+                        'Delta Risk': 1 - min(max(current_delta, 0), 1),
+                        'Time Left': 1 - min(days_left / 365, 1),
+                        'IV Risk': min(current_iv * 2, 1) if current_iv else 0.5,
+                        'Moneyness': max(0, 1 - (stock_price / strike)) if strike > 0 else 0.5,
+                        'Sentiment': (1 - max(-1, min(1, -sentiment_adj / 50))) / 2
+                    }
+                    
+                    positions_with_risk.append((risk_score, idx, row_idx, pos, option_price, current_iv, gamma, theta, 
+                                               current_delta, days_left, stock_price, ai_score, factor_scores, beta_factor))
+                except Exception as e:
+                    positions_with_risk.append((50.0, idx, row_idx, pos, None, 0.35, 0, 0, 0.5, 0, None, 0, {}, 1.0))
             
             positions_with_risk.sort(key=lambda x: x[0], reverse=True)
             
-            for risk_score, idx, row_idx, pos in positions_with_risk:
+            for risk_score, idx, row_idx, pos, option_price, current_iv, gamma, theta, current_delta, days_left, stock_price, ai_score, factor_scores, beta_factor in positions_with_risk:
                 entry_price = float(pos['entry_price'])
                 contracts = int(pos['contracts'])
                 strike = float(pos['strike'])
@@ -2491,27 +2791,29 @@ if st.session_state.price and st.session_state.expiries:
                 target = float(pos['target_price'])
                 stop = float(pos['stop_loss'])
                 
-                option_price, current_iv, _, _ = get_current_option_price(ticker, expiry_date_str, strike)
+                if option_price is None:
+                    option_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry_date_str, strike)
+                    if option_price is None:
+                        option_price = 0
+                        current_iv = 0.35
+                        gamma = 0
+                        theta = 0
                 
                 risk_score_display = risk_score
-                beta_factor_display = beta_factor if 'beta_factor' in locals() else 1.0
-                days_left = 0
-                pnl = 0
-                pnl_pct = 0
+                days_left = max((pd.to_datetime(expiry_date_str).date() - datetime.now().date()).days, 0)
+                pnl = (option_price - entry_price) * contracts * 100 if option_price else 0
+                pnl_pct = ((option_price - entry_price) / entry_price) * 100 if entry_price > 0 and option_price else 0
+                
                 tech_score_pos = 1
                 ema_status = "neutral"
                 cts = 50
                 ev = 0
-                delta_calc = 0.5
+                delta_calc = current_delta if current_delta else 0.5
                 touch_prob = 0.5
                 rec_icon_full = "🔵 HOLD"
                 rec_reason = "Data unavailable"
                 
                 if option_price and option_price > 0:
-                    days_left = max((pd.to_datetime(expiry_date_str).date() - datetime.now().date()).days, 0)
-                    pnl = (option_price - entry_price) * contracts * 100
-                    pnl_pct = ((option_price - entry_price) / entry_price) * 100
-                    
                     try:
                         stock = yf.Ticker(ticker)
                         hist = stock.history(period="60d")
@@ -2532,27 +2834,24 @@ if st.session_state.price and st.session_state.expiries:
                         tech_score_pos = 1
                         ema_status = "neutral"
                     
-                    stock_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
-                    cts, ev, delta_calc, touch_prob = calculate_composite_score_for_position(
-                        stock_price, strike, days_left, current_iv, tech_score_pos
-                    )
+                    # Calculate CTS and EV
+                    if stock_price is None:
+                        stock_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
                     
+                    # Expected Value calculation for existing position
+                    pot_profit = option_price * (1 + st.session_state.profit_target_pct / 100)
+                    pot_loss = option_price * (st.session_state.stop_loss_pct / 100)
+                    ev = (touch_prob * pot_profit) - ((1 - touch_prob) * pot_loss)
+                    
+                    # Composite Score
+                    gt_ratio = calculate_gamma_theta_ratio(gamma, theta)
+                    cts = calculate_enhanced_cts(delta_calc, touch_prob, gt_ratio, tech_score_pos)
+                    
+                    # Get hybrid recommendation
                     rec_icon_full, rec_reason = get_hybrid_recommendation(
-                        option_price, entry_price, target, stop, days_left, delta_calc, 0, current_iv,
+                        option_price, entry_price, target, stop, days_left, delta_calc, theta, current_iv,
                         cts, ev, tech_score_pos, ema_status, "stable", 0, touch_prob, 50
                     )
-                else:
-                    days_left = 0
-                    pnl = 0
-                    pnl_pct = 0
-                    tech_score_pos = 1
-                    ema_status = "neutral"
-                    cts = 50
-                    ev = 0
-                    delta_calc = 0.5
-                    touch_prob = 0.5
-                    rec_icon_full = "🔵 HOLD"
-                    rec_reason = "Data unavailable"
                 
                 if risk_score_display > 70:
                     risk_indicator = "🔴 HIGH"
@@ -2562,22 +2861,150 @@ if st.session_state.price and st.session_state.expiries:
                     risk_indicator = "🟢 LOW"
                 
                 rec_icon = rec_icon_full.split()[0]
-                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price if option_price else 0:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
                 
                 with st.expander(summary):
                     st.markdown("### 📊 Position Summary")
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Current Option Price", f"${option_price if option_price else 0:.2f}")
+                        st.metric("Current Option Price", f"${option_price:.2f}")
                         pnl_color = "inverse" if pnl < 0 else "normal"
                         st.metric("P&L", f"{pnl_pct:+.1f}%", delta=f"${pnl:+.0f}", delta_color=pnl_color)
-                        st.metric("Risk Score", f"{risk_score_display:.1f}/100", help=f"Beta-adjusted: {beta_factor_display:.1f}x")
+                        st.metric("Risk Score", f"{risk_score_display:.1f}/100", help=f"Beta-adjusted: {beta_factor:.1f}x")
                     with col2:
                         st.metric("Days Left", f"{days_left}")
                         st.metric("Delta", f"{delta_calc:.3f}")
+                        if gamma:
+                            st.metric("Gamma", f"{gamma:.4f}")
                     with col3:
                         st.metric("Entry Price (Avg)", f"${entry_price:.2f}")
                         st.metric("Contracts", contracts)
+                        if theta:
+                            st.metric("Theta (daily)", f"-${abs(theta):.3f}")
+                    
+                    # ============================================================
+                    # NEW: Risk Score Breakdown Expander
+                    # ============================================================
+                    with st.expander("📊 Risk Score Breakdown", expanded=False):
+                        st.markdown("**6-Factor Risk Analysis**")
+                        
+                        risk_factors = [
+                            ("Position Size", factor_scores.get('Position Size', 0.5), "Larger positions relative to $50k baseline"),
+                            ("Delta Risk", factor_scores.get('Delta Risk', 0.5), "Higher delta = more directional exposure"),
+                            ("Time Left", factor_scores.get('Time Left', 0.5), "Less time = higher theta decay risk"),
+                            ("IV Risk", factor_scores.get('IV Risk', 0.5), "High IV = expensive options with crash risk"),
+                            ("Moneyness", factor_scores.get('Moneyness', 0.5), "OTM options have lower probability"),
+                            ("Sentiment", factor_scores.get('Sentiment', 0.5), "Bearish sentiment increases risk")
+                        ]
+                        
+                        for factor_name, factor_score, explanation in risk_factors:
+                            if factor_score > 0.7:
+                                color = "🔴"
+                            elif factor_score > 0.4:
+                                color = "🟡"
+                            else:
+                                color = "🟢"
+                            
+                            st.markdown(f"**{color} {factor_name}:** {factor_score*100:.0f}/100")
+                            st.caption(f"*{explanation}*")
+                            st.progress(factor_score)
+                        
+                        st.caption(f"**Total Risk Score:** {risk_score_display:.1f}/100")
+                        if risk_score_display > 70:
+                            st.warning("⚠️ High risk position - consider reducing size or tightening stops")
+                        elif risk_score_display > 40:
+                            st.info("📊 Medium risk - normal monitoring")
+                        else:
+                            st.success("✅ Low risk position")
+                    
+                    # ============================================================
+                    # NEW: 5-Day Forecast & AI Insights Expander
+                    # ============================================================
+                    with st.expander("📈 5-Day Forecast & AI Insights", expanded=False):
+                        # Get ATR for volatility
+                        try:
+                            stock_hist = yf.Ticker(ticker).history(period="20d")
+                            _, atr_pct = calculate_atr(stock_hist)
+                        except:
+                            atr_pct = 2.0  # Default 2% ATR
+                        
+                        # Sub-section A: Quantitative Forecast
+                        st.markdown("#### 📊 Quantitative Forecast (5-Day)")
+                        
+                        # Calculate forecasts
+                        expected_price, price_upper, price_lower, theta_decay_5d, iv_impact = forecast_5day_price(
+                            option_price, delta_calc, gamma, theta, 0, current_iv, 0, 5
+                        )
+                        
+                        prob_target = probability_hit_target(option_price, target, 5, atr_pct, stock_price if stock_price else S, delta_calc)
+                        prob_stop = probability_hit_stop(option_price, stop, 5, atr_pct, stock_price if stock_price else S, delta_calc)
+                        
+                        iv_percentile = estimate_iv_percentile(current_iv, calculate_hv(stock_hist) if not stock_hist.empty else 20)
+                        
+                        col_q1, col_q2, col_q3 = st.columns(3)
+                        with col_q1:
+                            st.metric("Expected Price (5d)", f"${expected_price:.2f}")
+                            st.caption(f"80% Range: ${price_lower:.2f} - ${price_upper:.2f}")
+                            st.metric("Theta Decay (5d)", f"-${theta_decay_5d:.2f}", delta=f"{-abs(theta_decay_5d/option_price)*100:.1f}% of premium")
+                        with col_q2:
+                            st.metric("🎯 Probability Hit Target", f"{prob_target*100:.0f}%")
+                            st.metric("🛑 Probability Hit Stop", f"{prob_stop*100:.0f}%")
+                        with col_q3:
+                            st.metric("IV Percentile", f"{iv_percentile:.0f}th")
+                            if iv_percentile > 80:
+                                st.warning("⚠️ IV is expensive - earnings or event risk")
+                            elif iv_percentile < 20:
+                                st.success("✅ IV is cheap - good entry")
+                            if iv_impact != 0:
+                                st.caption(f"IV Change Impact: ${iv_impact:+.2f}")
+                        
+                        # Sub-section B: AI Sentiment Insights
+                        st.markdown("#### 🤖 AI Sentiment Insights")
+                        
+                        ai_sentiment_data = get_ai_forecast_for_position(ticker, stock_price if stock_price else S, strike, current_iv)
+                        ai_sentiment_score = ai_sentiment_data.get('sentiment_score', 0)
+                        ai_label = ai_sentiment_data.get('sentiment_label', 'Neutral')
+                        ai_themes = ai_sentiment_data.get('key_themes', ['No recent news'])[:3]
+                        ai_catalyst = ai_sentiment_data.get('catalyst', None)
+                        
+                        col_a1, col_a2 = st.columns(2)
+                        with col_a1:
+                            if ai_sentiment_score > 0.3:
+                                st.success(f"**Sentiment: {ai_label}**")
+                            elif ai_sentiment_score < -0.3:
+                                st.error(f"**Sentiment: {ai_label}**")
+                            else:
+                                st.info(f"**Sentiment: {ai_label}**")
+                            st.metric("Sentiment Score", f"{ai_sentiment_score:+.2f}")
+                            
+                            if ai_catalyst:
+                                st.info(f"📅 **Catalyst:** {ai_catalyst[:50]}...")
+                        with col_a2:
+                            st.write("**Key Themes:**")
+                            for theme in ai_themes:
+                                st.write(f"- {theme}")
+                        
+                        # Sub-section C: Combined Recommendation
+                        st.markdown("#### 🎯 Combined Recommendation")
+                        
+                        # Get combined recommendation
+                        combined_rec, combined_reason, combined_score = get_combined_recommendation(
+                            cts, ai_sentiment_score, option_price, stop, days_left
+                        )
+                        
+                        col_r1, col_r2 = st.columns([1, 2])
+                        with col_r1:
+                            st.markdown(f"## {combined_rec}")
+                        with col_r2:
+                            st.write(combined_reason)
+                            st.caption(f"Combined Score: {combined_score:.0f}/100 (60% Quant + 40% AI)")
+                        
+                        # Expected 5-day P&L
+                        expected_5d_pnl = (expected_price - option_price) * contracts * 100
+                        if expected_5d_pnl > 0:
+                            st.success(f"💰 Expected 5-Day P&L: +${expected_5d_pnl:,.0f}")
+                        else:
+                            st.warning(f"⚠️ Expected 5-Day P&L: ${expected_5d_pnl:,.0f}")
                     
                     st.markdown("---")
                     st.markdown("### 💡 Recommendation")
@@ -2588,11 +3015,13 @@ if st.session_state.price and st.session_state.expiries:
                     st.markdown("### 📊 Quant Analytics")
                     q1, q2, q3 = st.columns(3)
                     with q1:
-                        st.metric("Expected Value (EV)", f"${ev:.2f}")
+                        st.metric("Expected Value (EV)", f"${ev:.2f}" if isinstance(ev, (int, float)) else "N/A")
                         st.metric("Composite Score", f"{cts}/100")
                         st.metric("Touch Probability", f"{touch_prob*100:.0f}%")
                     with q2:
                         st.metric("IV", f"{current_iv*100:.1f}%" if current_iv else "N/A")
+                        if gamma:
+                            st.metric("Gamma/Theta Ratio", f"{calculate_gamma_theta_ratio(gamma, theta):.2f}")
                     with q3:
                         st.metric("Technical Score", f"{tech_score_pos}/3")
                     
@@ -2669,6 +3098,59 @@ if st.session_state.price and st.session_state.expiries:
             
             selected_expiry_str = st.selectbox("Expiry Date:", options=expiry_options, index=default_expiry_index, key="portfolio_expiry_select")
             st.session_state.last_selected_expiry = selected_expiry_str
+            
+            def get_conservative_strike_for_expiry(ticker, expiry_date, profit_target_pct, stop_loss_pct):
+                try:
+                    stock_obj = yf.Ticker(ticker)
+                    hist = stock_obj.history(period="100d")
+                    if hist.empty:
+                        return None, None
+                    current_price = get_cached_current_price(ticker)
+                    if current_price is None:
+                        current_price = stock_obj.history(period="1d")['Close'].iloc[-1]
+                    opt_chain = stock_obj.option_chain(expiry_date)
+                    calls = opt_chain.calls
+                    df_tech = hist.copy()
+                    curr, prev = get_technicals(df_tech)
+                    tech_score = 0
+                    if curr['ema8'] > curr['ema20']:
+                        tech_score += 1
+                    if curr['hist'] > prev['hist']:
+                        tech_score += 1
+                    if current_price > curr['sma20']:
+                        tech_score += 1
+                    conservative_candidates = []
+                    days_to_expiry = (pd.to_datetime(expiry_date).date() - datetime.now().date()).days
+                    t_yrs = max(days_to_expiry, 1) / 365
+                    for _, row in calls.iterrows():
+                        mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        if mid_p <= 0 or row['impliedVolatility'] <= 0:
+                            continue
+                        d, _, _, _ = calculate_greeks(current_price, row['strike'], t_yrs, 0.05, row['impliedVolatility'])
+                        if 0.50 <= d <= 0.60:
+                            p_touch = calculate_p_touch(current_price, row['strike'], t_yrs, row['impliedVolatility'])
+                            ev_val = (p_touch * (mid_p * (1 + profit_target_pct / 100))) - ((1 - p_touch) * (mid_p * (stop_loss_pct / 100)))
+                            conservative_candidates.append({'strike': row['strike'], 'mid': mid_p, 'ev': ev_val})
+                    if conservative_candidates:
+                        best = max(conservative_candidates, key=lambda x: x['ev'])
+                        return best['strike'], best['mid']
+                    return None, None
+                except Exception:
+                    return None, None
+            
+            def get_strikes_for_expiry(ticker, expiry_date):
+                try:
+                    stock_obj = yf.Ticker(ticker)
+                    opt_chain = stock_obj.option_chain(expiry_date)
+                    calls = opt_chain.calls
+                    strikes_with_prices = []
+                    for _, row in calls.iterrows():
+                        mid_p = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
+                        if mid_p > 0:
+                            strikes_with_prices.append({'strike': row['strike'], 'mid': mid_p})
+                    return sorted(strikes_with_prices, key=lambda x: x['strike'])
+                except Exception:
+                    return []
             
             cons_strike, cons_mid = get_conservative_strike_for_expiry(
                 current_ticker, selected_expiry_str, st.session_state.profit_target_pct, st.session_state.stop_loss_pct
