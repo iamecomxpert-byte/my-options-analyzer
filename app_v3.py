@@ -237,18 +237,17 @@ def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma,
 def probability_hit_target(current_option_price, target_price, days, option_iv, num_sims=500):
     """
     Calculate probability of hitting profit target using OPTION implied volatility.
-    
-    Option IV is typically 30-80%, correctly capturing option price behavior.
     """
     try:
+        # FIX: If target is below current price, probability should be 0, not 100
         if target_price <= current_option_price:
-            return 1.0
+            return 0.0  # Target already reached or below current
         
         # Daily option volatility from IV
         daily_vol = option_iv / np.sqrt(252)
         
-        # No drift assumption for options
-        drift = 0.0
+        # Expected drift (slight bullish bias for calls)
+        drift = 0.05 / 252  # 5% annual
         
         # Vectorized Monte Carlo
         np.random.seed(42)
@@ -258,9 +257,9 @@ def probability_hit_target(current_option_price, target_price, days, option_iv, 
         hit_target = np.any(price_paths >= target_price, axis=1)
         probability = np.mean(hit_target)
         
-        return round(probability, 3)
+        return round(min(probability, 0.95), 3)  # Cap at 95%
     except Exception:
-        return 0.3
+        return 0.25  # Default 25% for OTM options
 
 def probability_hit_stop(current_option_price, stop_price, days, option_iv, num_sims=500):
     """
@@ -289,9 +288,18 @@ def estimate_iv_percentile(current_iv, hv):
     Estimate IV percentile using IV/HV spread as proxy.
     """
     try:
-        spread = (current_iv * 100) - hv
+        if current_iv is None or hv is None or hv == 0:
+            return 50
+        
+        current_iv_pct = current_iv * 100
+        spread = current_iv_pct - hv
+        
+        # FIX: Normalize spread to percentile (assuming typical IV range 20-80%)
+        # If IV is 50% and HV is 30%, spread = 20 → ~80th percentile
+        # If IV is 30% and HV is 30%, spread = 0 → 50th percentile
+        # If IV is 20% and HV is 40%, spread = -20 → ~20th percentile
         percentile = 50 + spread
-        return max(0, min(100, percentile))
+        return max(5, min(95, percentile))  # Cap between 5-95%
     except Exception:
         return 50
 
@@ -1335,11 +1343,18 @@ def get_current_option_price(ticker, expiry, strike):
             row = option_row.iloc[0]
             mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
             iv = row['impliedVolatility']
-            gamma = row['gamma'] if 'gamma' in row else 0
-            theta = row['theta'] if 'theta' in row else 0
+            # Fix: Get gamma and theta from the row (they exist in yfinance)
+            gamma = row.get('gamma', 0)
+            theta = row.get('theta', 0)
+            # If theta is still 0, estimate it
+            if theta == 0 and iv > 0 and mid > 0:
+                # Rough theta estimate: ~0.5-1% of premium per day for 30-45 DTE
+                days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
+                if days_to_expiry > 0:
+                    theta = -mid * 0.015  # 1.5% of premium per day as rough estimate
             return mid, iv, gamma, theta
         return None, None, None, None
-    except Exception:
+    except Exception as e:
         return None, None, None, None
 
 # --- GROQ RETRY LOGIC ---
@@ -2965,6 +2980,12 @@ if st.session_state.price and st.session_state.expiries:
                         expected_price, price_upper, price_lower, theta_decay_5d, iv_impact, leverage = forecast_5day_price(
                             option_price, stock_price, strike, delta_calc, gamma, theta, 0, current_iv, 0, 5, 0.03
                         )
+
+                        # ========== DEBUG: Add this block ==========
+                        st.caption(f"🔍 DEBUG: Current Price=${option_price:.2f}, Target=${target:.2f}, Stop=${stop:.2f}")
+                        st.caption(f"🔍 DEBUG: Stock=${stock_price:.2f}, Strike=${strike:.2f}, Delta={delta_calc:.3f}, Theta={theta:.4f}, IV={current_iv:.3f}")
+                        st.caption(f"🔍 DEBUG: Leverage={leverage:.1f}x, Expected Move=${expected_price - option_price:+.2f} ({((expected_price/option_price)-1)*100:.1f}%)")
+                        # ==========================================
                         
                         prob_target = probability_hit_target(option_price, target, 5, current_iv)
                         prob_stop = probability_hit_stop(option_price, stop, 5, current_iv)
