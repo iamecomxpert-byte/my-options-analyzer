@@ -169,29 +169,8 @@ def calculate_dynamic_targets(stock_price, option_price, delta, gamma, theta, da
 def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma, theta, vega, current_iv, forecast_iv_change=0, days=5, expected_stock_move_pct=0.03):
     """
     Calculate expected option price in 5 days using proper options math.
-    
-    Options amplify stock moves through delta and gamma convexity.
-    Expected 5-day stock move: 3% (typical for average volatility stock)
-    
-    Example:
-    - Stock: $100, Option: $5, Delta: 0.50
-    - Leverage = 0.50 × (100/5) = 10x
-    - 3% stock move → 30% option move ($5 → $6.50)
-    
-    Returns:
-    - expected_price: Expected price in 5 days
-    - price_upper: Upper bound (80% confidence)
-    - price_lower: Lower bound (80% confidence)
-    - theta_decay: Total theta decay in dollars
-    - iv_impact: Impact of IV change in dollars
-    - leverage: Effective leverage factor
     """
     try:
-        # ===== DEBUG INSIDE FUNCTION =====
-        st.caption(f"🔍 INSIDE FUNCTION: expected_stock_move_pct = {expected_stock_move_pct}")
-        st.caption(f"🔍 INSIDE FUNCTION: current_price=${current_option_price}, stock=${stock_price}, delta={delta}")
-        # ================================
-        
         # Theta decay (daily decay over 5 days)
         theta_decay = abs(theta) * days
         
@@ -199,49 +178,46 @@ def forecast_5day_price(current_option_price, stock_price, strike, delta, gamma,
         iv_impact = vega * forecast_iv_change
         
         # ========== CORRECT LEVERAGE CALCULATION ==========
-        # Actual options leverage: delta × (stock_price / option_price)
         if current_option_price > 0 and stock_price > 0:
             actual_leverage = delta * (stock_price / current_option_price)
-            actual_leverage = min(max(actual_leverage, 2.0), 30.0)  # Cap between 2x and 30x
+            actual_leverage = min(max(actual_leverage, 2.0), 30.0)
         else:
-            actual_leverage = 8.0  # Default for ATM options
+            actual_leverage = 8.0
         
-        # Expected option percentage move
-        expected_option_move_pct = actual_leverage * expected_stock_move_pct
+        # FIX: Convert percentage to decimal correctly
+        # expected_stock_move_pct is already a decimal (0.03 = 3%)
+        expected_stock_move_decimal = expected_stock_move_pct  # Keep as is (0.03)
+        
+        # Expected option percentage move (as decimal, e.g., 0.117 for 11.7%)
+        expected_option_move_decimal = actual_leverage * expected_stock_move_decimal
+        
+        # Convert to percentage for display (multiply by 100)
+        expected_option_move_pct_display = expected_option_move_decimal * 100
         
         # Dollar move
-        expected_dollar_move = current_option_price * (expected_option_move_pct / 100)
+        expected_dollar_move = current_option_price * expected_option_move_decimal
         
-        # Gamma convexity (adds more for larger deltas and ATM options)
+        # Gamma convexity
         try:
             moneyness = stock_price / strike if strike > 0 else 1.0
-            if moneyness > 0.95:  # ATM or slightly ITM
+            if moneyness > 0.95:
                 gamma_boost = 1.0 + (gamma * stock_price)
-                gamma_boost = min(max(gamma_boost, 1.1), 1.5)  # 10-50% boost
-            else:  # OTM
-                gamma_boost = 1.1  # Lower boost for OTM
+                gamma_boost = min(max(gamma_boost, 1.1), 1.5)
+            else:
+                gamma_boost = 1.1
         except:
             gamma_boost = 1.2
         
         expected_price_change = expected_dollar_move * gamma_boost
-
-        # ===== DEBUG CALCULATION =====
-        st.caption(f"🔍 CALC: leverage={actual_leverage}x, expected_option_move_pct={expected_option_move_pct:.1f}%")
-        st.caption(f"🔍 CALC: expected_dollar_move=${expected_dollar_move:.2f}, gamma_boost={gamma_boost:.2f}x")
-        st.caption(f"🔍 CALC: expected_price_change=${expected_price_change:.2f}, theta_decay=${theta_decay:.2f}")
-        # ============================
         
         # Total expected price
         expected_price = current_option_price - theta_decay + iv_impact + expected_price_change
-        
-        # ===== DEBUG FINAL =====
-        st.caption(f"🔍 FINAL: current=${current_option_price:.2f} - theta=${theta_decay:.2f} + change=${expected_price_change:.2f} = ${expected_price:.2f}")
-        st.caption(f"🔍 FINAL: Expected return = {((expected_price/current_option_price)-1)*100:.1f}%")
-        # ======================
-        
         expected_price = max(expected_price, 0.05)
         
-        # 80% confidence bounds (wider for options due to convexity)
+        # Debug (remove after fixing)
+        # st.caption(f"🔍 FIXED: leverage={actual_leverage:.1f}x, stock_move={expected_stock_move_decimal*100:.1f}%, option_move={expected_option_move_pct_display:.1f}%")
+        
+        # 80% confidence bounds
         uncertainty_factor = abs(expected_price_change) * 0.8
         price_upper = expected_price + uncertainty_factor
         price_lower = max(expected_price - uncertainty_factor, 0.05)
