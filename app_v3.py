@@ -2833,8 +2833,31 @@ if st.session_state.price and st.session_state.expiries:
                 strike = float(pos['strike'])
                 ticker = pos['ticker']
                 expiry_date_str = pos['expiry']
-                target = float(pos['target_price'])
-                stop = float(pos['stop_loss'])
+                
+                # Get stored targets from sheet
+                stored_target = float(pos['target_price'])
+                stored_stop = float(pos['stop_loss'])
+                
+                # DYNAMIC TARGET: Use current price if it's more realistic
+                if option_price and option_price > 0:
+                    # Target should be ABOVE current price for a long call
+                    if stored_target > option_price:
+                        target = stored_target
+                    else:
+                        # Calculate realistic target based on current price + expected move
+                        # Options typically need 30-50% move to be profitable
+                        target = option_price * 1.35  # 35% target from current
+                        st.caption(f"🔄 Target adjusted from ${stored_target:.2f} to ${target:.2f} (based on current price)")
+                    
+                    # Stop should be BELOW current price
+                    if stored_stop < option_price:
+                        stop = stored_stop
+                    else:
+                        stop = option_price * 0.70  # 30% stop from current
+                        st.caption(f"🔄 Stop adjusted from ${stored_stop:.2f} to ${stop:.2f} (based on current price)")
+                else:
+                    target = stored_target
+                    stop = stored_stop
                 
                 if option_price is None:
                     option_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry_date_str, strike)
