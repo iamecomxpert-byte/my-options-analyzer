@@ -1356,12 +1356,17 @@ def get_current_option_price(ticker, expiry, strike):
             days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
             T_years = max(days_to_expiry, 1) / 365
             
-            # Calculate gamma and theta using Black-Scholes
-            _, gamma, theta, _ = calculate_greeks(stock_price, float(strike), T_years, 0.05, iv)
+            # FIX: calculate_greeks returns (delta, gamma, theta, vega) in THAT order
+            # Your current call might be misaligned
+            delta, gamma, theta, vega = calculate_greeks(stock_price, float(strike), T_years, 0.05, iv)
+            
+            # Debug: Print to confirm
+            # st.caption(f"🔍 GREEKS: delta={delta}, gamma={gamma}, theta={theta}, vega={vega}")
             
             return mid, iv, gamma, theta
         return None, None, None, None
     except Exception as e:
+        st.caption(f"Error in get_current_option_price: {str(e)}")
         return None, None, None, None
 
 # --- GROQ RETRY LOGIC ---
@@ -1533,7 +1538,7 @@ def calculate_greeks(S, K, T, r, sigma, type="call"):
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
     vega = (S * norm.pdf(d1) * np.sqrt(T)) / 100
-    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)
+    return round(delta, 3), round(gamma, 4), round(theta, 3), round(vega, 3)  # Order: delta, gamma, theta, vega
 
 def calculate_p_touch(S, K, T, sigma):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0
