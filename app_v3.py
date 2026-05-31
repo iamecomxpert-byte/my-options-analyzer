@@ -343,7 +343,6 @@ def calculate_portfolio_forecast(positions, st_price=None):
     positions_improving = 0
     positions_declining = 0
     
-    # We'll store individual position forecasts if needed
     position_forecasts = []
     
     for pos in positions:
@@ -358,21 +357,31 @@ def calculate_portfolio_forecast(positions, st_price=None):
             current_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry, strike)
             
             if current_price and current_price > 0:
-                # Get stock price and ATR for volatility
+                # Get stock price
                 stock = yf.Ticker(ticker)
                 hist = stock.history(period="20d")
                 if not hist.empty:
-                    _, atr_pct = calculate_atr(hist)
                     current_stock = hist['Close'].iloc[-1]
                     
                     # Calculate delta for this contract
                     days_left = max((pd.to_datetime(expiry).date() - datetime.now().date()).days, 1)
                     d, _, _, _ = calculate_greeks(current_stock, strike, days_left/365, 0.05, current_iv)
                     
-                    # Forecast price
-                    expected_price, _, _, theta_decay, _ = forecast_5day_price(
-                        current_price, d, gamma, theta, 0, current_iv, 0, 5
+                    # ========== FIXED: Correct forecast with all 12 parameters ==========
+                    expected_price, _, _, theta_decay, _, _ = forecast_5day_price(
+                        current_price,      # current_option_price
+                        current_stock,      # stock_price  
+                        strike,             # strike
+                        d,                  # delta
+                        gamma,              # gamma
+                        theta,              # theta
+                        0,                  # vega (not used in portfolio aggregate)
+                        current_iv,         # current_iv
+                        0,                  # forecast_iv_change
+                        5,                  # days
+                        0.03                # expected_stock_move_pct (3%)
                     )
+                    # ================================================================
                     
                     position_value = current_price * contracts * 100
                     forecast_value = expected_price * contracts * 100
