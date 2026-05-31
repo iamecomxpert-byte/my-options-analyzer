@@ -654,16 +654,47 @@ def estimate_pullback_entry(current_price, atr_pct, rsi, sentiment_score, curr_i
 
 def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, sentiment_score, atr_pct):
     """
-    Generate complete pullback entry recommendation with actionable levels
+    Generate complete pullback entry recommendation with trend awareness
     """
     # Get technical indicators
     curr_indicators, _ = get_technicals(hist_data)
     
-    # Calculate different entry estimates
-    atr_entry = current_price * (1 - atr_pct / 100)
-    bollinger_entry = curr_indicators['lower']
+    # Determine trend strength - how far price is above SMA20
+    price_vs_sma20 = ((current_price / curr_indicators['sma20']) - 1) * 100
+    
+    # Trend factor - reduces pullback expectations in strong uptrends
+    if price_vs_sma20 > 15:  # Extended rally (like IREN +39%)
+        trend_factor = 0.4
+        max_allowed_pullback = 5
+        trend_note = "Strong uptrend - limited pullback expected (4-5%)"
+    elif price_vs_sma20 > 10:
+        trend_factor = 0.55
+        max_allowed_pullback = 7
+        trend_note = "Moderate uptrend - shallow pullback expected (5-7%)"
+    elif price_vs_sma20 > 5:
+        trend_factor = 0.7
+        max_allowed_pullback = 9
+        trend_note = "Mild uptrend - moderate pullback possible (7-9%)"
+    elif price_vs_sma20 < -8:
+        trend_factor = 1.3
+        max_allowed_pullback = 15
+        trend_note = "Downtrend - deeper pullback possible"
+    else:
+        trend_factor = 1.0
+        max_allowed_pullback = 10
+        trend_note = "Normal range"
+    
+    # For strong trends, use SMA20 as primary support, not lower BB
+    if price_vs_sma20 > 10:
+        bollinger_entry = curr_indicators['sma20']  # Use SMA20 instead of lower BB
+    else:
+        bollinger_entry = curr_indicators['lower']
+    
     sma_entry = curr_indicators['sma20']
     max_pain_entry = max_pain if max_pain and max_pain < current_price else None
+    
+    # Calculate ATR-based entry with trend factor
+    atr_entry = current_price * (1 - (atr_pct * trend_factor) / 100)
     
     # Calculate confidence-weighted average entry
     entries = []
@@ -671,68 +702,49 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
     
     # ATR-based entry (weight: rsi-dependent)
     if rsi < 45:
-        atr_weight = 0.4  # Deeper pullback expected
+        atr_weight = 0.35
     else:
         atr_weight = 0.25
     entries.append(atr_entry)
     weights.append(atr_weight)
     
-    # Bollinger Band entry (weight: 0.3)
+    # Bollinger/SMA entry (higher weight)
     entries.append(bollinger_entry)
-    weights.append(0.3)
+    weights.append(0.35)
     
-    # SMA20 entry (weight: 0.2)
+    # SMA20 entry (higher weight in strong trends)
+    sma_weight = 0.3 if price_vs_sma20 > 10 else 0.2
     entries.append(sma_entry)
-    weights.append(0.2)
+    weights.append(sma_weight)
     
-    # Max Pain entry (if available, weight: 0.25)
+    # Max Pain entry (if available)
     if max_pain_entry:
         entries.append(max_pain_entry)
-        weights.append(0.25)
+        weights.append(0.2)
     else:
-        # Normalize weights
+        # Normalize weights if no max pain
         weights = [w/sum(weights) for w in weights]
     
     # Calculate weighted average
     weighted_entry = sum(e * w for e, w in zip(entries, weights))
     
-    # Cap the weighted entry to a maximum realistic pullback
-    # Maximum pullback based on ATR (never more than 3x ATR)
-    max_realistic_pullback_pct = min(atr_pct * 3, 15)  # Cap at 15% absolute max
-    max_realistic_entry = current_price * (1 - max_realistic_pullback_pct / 100)
-    
-    if weighted_entry < max_realistic_entry:
-        weighted_entry = max_realistic_entry
-    
-    # Sentiment adjustment (MORE CONSERVATIVE)
+    # Sentiment adjustment (more conservative)
     if sentiment_score > 0.5:
         entry_adjustment = 0.98  # Only 2% pullback for strong bullish
-        sentiment_text = "Strongly Bullish - Very limited downside expected"
-        sentiment_factor = "shallow"
+        sentiment_text = "Strongly Bullish - Limited downside expected"
     elif sentiment_score > 0.2:
         entry_adjustment = 0.96  # 4% pullback for bullish
-        sentiment_text = "Bullish - Limited downside expected"
-        sentiment_factor = "mild"
+        sentiment_text = "Bullish - Moderate pullback possible"
     elif sentiment_score > 0:
-        entry_adjustment = 0.93  # 7% pullback for leaning bullish
+        entry_adjustment = 0.94  # 6% pullback for leaning bullish
         sentiment_text = "Leaning Bullish - Moderate pullback possible"
-        sentiment_factor = "moderate"
     else:
-        entry_adjustment = 0.90  # 10% pullback for neutral/negative
-        sentiment_text = "Neutral/Bearish - Deeper pullback possible"
-        sentiment_factor = "deeper"
+        entry_adjustment = 0.91  # 9% pullback for neutral
+        sentiment_text = "Neutral - Technical pullback expected"
     
     final_entry = weighted_entry * entry_adjustment
     
-    # FINAL SANITY CHECK - Cap at realistic levels
-    # Determine volatility-based max pullback
-    if atr_pct > 5:  # High volatility stock (like crypto, tech)
-        max_allowed_pullback = 18
-    elif atr_pct > 3:  # Medium volatility
-        max_allowed_pullback = 12
-    else:  # Low volatility
-        max_allowed_pullback = 8
-    
+    # FINAL SANITY CHECK - Cap based on trend
     actual_pullback_pct = ((current_price - final_entry) / current_price) * 100
     
     if actual_pullback_pct > max_allowed_pullback:
@@ -740,38 +752,47 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
         final_entry = current_price * (1 - max_allowed_pullback / 100)
         actual_pullback_pct = max_allowed_pullback
     
-    # Calculate estimated time to pullback (in days) - FIXED LOGIC
-    # Lower RSI = already weaker = may take longer to pullback further
-    # Higher RSI = overbought = faster pullback
+    # Ensure minimum entry is reasonable (not more than 10% below SMA20)
+    min_reasonable_entry = curr_indicators['sma20'] * 0.92
+    if final_entry < min_reasonable_entry:
+        final_entry = min_reasonable_entry
+        actual_pullback_pct = ((current_price - final_entry) / current_price) * 100
+    
+    # Calculate estimated time to pullback (in days)
     if rsi > 65:
-        estimated_days = 1  # Very overbought - immediate pullback
+        estimated_days = 1
     elif rsi > 55:
-        estimated_days = 2  # Overbought - quick pullback
+        estimated_days = 2
     elif rsi > 45:
-        estimated_days = 3  # Neutral - moderate timing
+        estimated_days = 3
     elif rsi > 35:
-        estimated_days = 4  # Slightly weak - may drift lower slowly
+        estimated_days = 4
     else:
-        estimated_days = 5  # Already weak - needs time to reverse
+        estimated_days = 5
+    
+    # Generate realistic entry zones
+    conservative_entry = final_entry * 1.02  # 2% above optimal
+    aggressive_entry = final_entry * 0.98    # 2% below optimal
     
     return {
         'estimated_entry': round(final_entry, 2),
         'entry_range': {
-            'aggressive': round(min(entries), 2),  # Lowest price
-            'conservative': round(max(entries), 2),  # Highest entry
+            'aggressive': round(aggressive_entry, 2),
+            'conservative': round(conservative_entry, 2),
             'optimal': round(final_entry, 2)
         },
         'support_levels': {
             'first_support': round(sma_entry, 2),
-            'second_support': round(bollinger_entry, 2),
-            'deep_support': round(max_pain_entry, 2) if max_pain_entry else round(bollinger_entry * 0.97, 2)
+            'second_support': round(curr_indicators['lower'], 2),
+            'deep_support': round(max_pain_entry, 2) if max_pain_entry else round(curr_indicators['lower'] * 0.97, 2)
         },
         'estimated_pullback_pct': round(actual_pullback_pct, 1),
         'estimated_days_to_pullback': estimated_days,
         'sentiment_text': sentiment_text,
-        'sentiment_factor': sentiment_factor,
+        'trend_note': trend_note,
         'current_price': current_price,
-        'atr_pct': round(atr_pct, 1)
+        'atr_pct': round(atr_pct, 1),
+        'price_vs_sma20': round(price_vs_sma20, 1)
     }
 
 # --- GOOGLE SHEETS CONNECTION ---
@@ -1407,6 +1428,37 @@ if fetch_btn:
                 st.session_state.global_aggressive = aggr_contract
             if spec_contract:
                 st.session_state.global_speculative = spec_contract
+            
+            # ============================================================
+            # STORE PATH EXPECTATION VALUES ONCE AT FETCH TIME
+            # ============================================================
+            # Calculate and store technical values that shouldn't change with expiry
+            vix_value = get_vix()
+            atr_val, atr_pct_stored = calculate_atr(hist)
+            rsi_val_stored = calculate_rsi(hist)
+            
+            # Store in session state for consistent dashboard display
+            st.session_state.saved_rsi = rsi_val_stored
+            st.session_state.saved_atr_pct = atr_pct_stored
+            st.session_state.saved_vix = vix_value
+            st.session_state.saved_atr_trend = atr_pct_stored > 1.5
+            st.session_state.saved_vix_trend = vix_value > 20
+            
+            # Get sentiment from session state if available
+            sentiment_data_stored = getattr(st.session_state, 'current_sentiment', None)
+            saved_sentiment_score = sentiment_data_stored.get('sentiment_score', 0) if sentiment_data_stored else 0
+            st.session_state.saved_sentiment_score = saved_sentiment_score
+            
+            # Calculate and store the path expectation
+            path_icon, path_text = calculate_path_expectation(
+                st.session_state.saved_rsi,
+                st.session_state.saved_sentiment_score,
+                st.session_state.saved_atr_trend,
+                st.session_state.saved_vix_trend
+            )
+            st.session_state.saved_path_icon = path_icon
+            st.session_state.saved_path_text = path_text
+            # ============================================================
 
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
@@ -1513,14 +1565,27 @@ if st.session_state.price and st.session_state.expiries:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
         
-        path_icon, path_text = calculate_path_expectation(rsi_val, sentiment_score, atr_pct > 1.5, vix > 20)
+        # ============================================================
+        # USE SAVED PATH EXPECTATION (doesn't change with expiry)
+        # ============================================================
+        if 'saved_path_icon' in st.session_state and st.session_state.saved_path_icon:
+            path_icon = st.session_state.saved_path_icon
+            path_text = st.session_state.saved_path_text
+        else:
+            # Fallback calculation if not saved
+            path_icon, path_text = calculate_path_expectation(rsi_val, sentiment_score, atr_pct > 1.5, vix > 20)
+        
         st.info(f"{path_icon} **Path Expectation:** {path_text}")
+        
+        # Also store the current pullback condition for later use
+        is_pullback_scenario = (path_icon == "📉📈 Pullback then rise")
+        # ============================================================
         
         # ADD THIS RIGHT AFTER THE ABOVE LINE:
         # ============================================================
         # PULLBACK ENTRY ESTIMATES (Only for Pullback Then Rise scenario)
         # ============================================================
-        if path_icon == "📉📈 Pullback then rise":
+        if is_pullback_scenario:
             st.divider()
             st.subheader("🎯 Pullback Entry Estimates")
             st.caption("Based on ATR, RSI, Bollinger Bands, and Max Pain analysis")
