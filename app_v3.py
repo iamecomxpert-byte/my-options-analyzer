@@ -2540,7 +2540,7 @@ with t_portfolio:
     # --- ADD NEW POSITION FORM ---
     st.subheader("➕ Add New Position")
     
-    if not st.session_state.expiries:
+    if not st.session_state.get('expiries', []):
         st.warning("Please analyze a ticker first.")
     else:
         current_ticker = st.session_state.current_ticker if st.session_state.current_ticker else "SHOP"
