@@ -3421,7 +3421,10 @@ with t_summary:
 
 def process_tier_strategy_original(tab_component, delta_min, delta_max, tier_label, tech_score):
     with tab_component:
-        current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
+        expiries = st.session_state.get('expiries', [])
+        current_expiry = st.session_state.get('last_selected_expiry')
+        if not current_expiry and expiries:
+            current_expiry = expiries[0]
         if not current_expiry:
             st.warning("No expiry selected. Please analyze a ticker first.")
             return
