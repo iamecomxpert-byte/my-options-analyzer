@@ -1328,6 +1328,150 @@ def update_position_after_sell(row_index, sell_contracts, sell_price):
     
     return True
 
+# ========================
+# CASH MANAGEMENT FUNCTIONS
+# ========================
+
+def init_cash_sheet():
+    """Initialize the Cash sheet if it doesn't exist"""
+    sheet = get_google_sheet()
+    if not sheet:
+        return None
+    try:
+        worksheet = sheet.worksheet("Cash")
+    except:
+        worksheet = sheet.add_worksheet(title="Cash", rows="1000", cols="10")
+        headers = [
+            "timestamp", "trader_name", "type", "amount", 
+            "running_balance", "note", "transaction_id"
+        ]
+        worksheet.append_row(headers)
+    return worksheet
+
+def add_cash_transaction(trader_name, tx_type, amount, note=""):
+    """
+    Add a cash transaction (DEPOSIT or WITHDRAWAL)
+    
+    Args:
+        trader_name: Name of the trader
+        tx_type: "DEPOSIT" or "WITHDRAWAL"
+        amount: Dollar amount (positive for both)
+        note: Optional description
+    """
+    if amount <= 0:
+        st.warning(f"Amount must be greater than 0")
+        return False
+    
+    worksheet = init_cash_sheet()
+    if not worksheet:
+        return False
+    
+    # Get current balance
+    current_balance = get_cash_balance(trader_name)
+    
+    # Calculate new balance
+    if tx_type == "DEPOSIT":
+        new_balance = current_balance + amount
+    elif tx_type == "WITHDRAWAL":
+        if amount > current_balance:
+            st.warning(f"Insufficient balance. Current: ${current_balance:,.2f}")
+            return False
+        new_balance = current_balance - amount
+    else:
+        st.warning(f"Invalid transaction type: {tx_type}")
+        return False
+    
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tx_id = f"{trader_name}_{now}_{tx_type[:3]}_{int(amount*100)}"
+    
+    row = [
+        now, trader_name, tx_type, amount,
+        new_balance, note, tx_id
+    ]
+    worksheet.append_row(row)
+    return True
+
+def get_cash_balance(trader_name):
+    """
+    Get current cash balance for a trader
+    
+    Args:
+        trader_name: Name of the trader
+    
+    Returns:
+        Float: Current cash balance
+    """
+    worksheet = init_cash_sheet()
+    if not worksheet:
+        return 0.0
+    
+    records = worksheet.get_all_records()
+    if not records:
+        return 0.0
+    
+    # Filter by trader and get last transaction
+    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+    if not trader_transactions:
+        return 0.0
+    
+    # Get the last transaction's running balance
+    last_tx = trader_transactions[-1]
+    return float(last_tx.get('running_balance', 0))
+
+def get_cash_transactions(trader_name, limit=10):
+    """
+    Get recent cash transactions for a trader
+    
+    Args:
+        trader_name: Name of the trader
+        limit: Number of transactions to return
+    
+    Returns:
+        List of dictionaries with transaction details
+    """
+    worksheet = init_cash_sheet()
+    if not worksheet:
+        return []
+    
+    records = worksheet.get_all_records()
+    if not records:
+        return []
+    
+    # Filter by trader and sort by timestamp (newest first)
+    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+    trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    
+    return trader_transactions[:limit]
+
+def get_cash_summary(trader_name):
+    """
+    Get cash summary for a trader
+    
+    Returns:
+        Dictionary with cash metrics
+    """
+    worksheet = init_cash_sheet()
+    if not worksheet:
+        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+    
+    records = worksheet.get_all_records()
+    if not records:
+        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+    
+    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+    if not trader_transactions:
+        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+    
+    total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
+    total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
+    balance = float(trader_transactions[-1].get('running_balance', 0))
+    
+    return {
+        'balance': balance,
+        'total_deposits': total_deposits,
+        'total_withdrawals': total_withdrawals
+    }
+
 def calculate_portfolio_summary(positions_data):
     total_investment = 0
     total_unrealized_pnl = 0
@@ -2206,6 +2350,103 @@ with t_portfolio:
         st.progress(health_ratio, text=f"📊 {health_ratio*100:.0f}% of positions expected to improve")
     else:
         st.info("Add active positions to see 5-day portfolio forecast")
+
+    st.divider()
+    
+    # ============================================================
+    # CASH MANAGEMENT SECTION
+    # ============================================================
+    st.subheader("💵 Cash Management")
+    
+    # Get cash summary for selected trader
+    cash_summary = get_cash_summary(selected_trader_portfolio)
+    current_cash = cash_summary['balance']
+    total_deposits = cash_summary['total_deposits']
+    total_withdrawals = cash_summary['total_withdrawals']
+    
+    # Calculate total P&L and return
+    total_pnl = total_unrealized + total_realized
+    
+    # Return % based on net deposits (total deposited - total withdrawn)
+    net_deposits = total_deposits - total_withdrawals
+    if net_deposits > 0:
+        return_pct = (total_pnl / net_deposits) * 100
+    else:
+        return_pct = 0
+    
+    # Display cash metrics
+    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+    with col_c1:
+        st.metric("💰 Cash Balance", f"${current_cash:,.2f}")
+    with col_c2:
+        st.metric("💵 Total P&L", f"${total_pnl:+,.2f}")
+    with col_c3:
+        pnl_color = "normal" if return_pct >= 0 else "inverse"
+        st.metric("📊 Return %", f"{return_pct:+.1f}%", delta_color=pnl_color)
+    with col_c4:
+        st.metric("💳 Net Deposits", f"${net_deposits:,.2f}")
+    
+    # Deposit/Withdraw form
+    st.caption("Add cash to track your returns accurately")
+    
+    col_d1, col_d2, col_d3 = st.columns([2, 1, 1])
+    with col_d1:
+        cash_amount = st.number_input("Amount ($):", min_value=0.0, step=100.0, key="cash_amount")
+    with col_d2:
+        deposit_btn = st.button("💰 Deposit", key="deposit_btn", use_container_width=True)
+    with col_d3:
+        withdraw_btn = st.button("🏦 Withdraw", key="withdraw_btn", use_container_width=True)
+    
+    if deposit_btn and cash_amount > 0:
+        success = add_cash_transaction(selected_trader_portfolio, "DEPOSIT", cash_amount)
+        if success:
+            st.success(f"✅ Deposited ${cash_amount:,.2f}")
+            st.rerun()
+        else:
+            st.error("❌ Failed to deposit. Check your input.")
+    
+    if withdraw_btn and cash_amount > 0:
+        if cash_amount <= current_cash:
+            success = add_cash_transaction(selected_trader_portfolio, "WITHDRAWAL", cash_amount)
+            if success:
+                st.success(f"✅ Withdrew ${cash_amount:,.2f}")
+                st.rerun()
+            else:
+                st.error("❌ Failed to withdraw.")
+        else:
+            st.error(f"❌ Insufficient balance. Current cash: ${current_cash:,.2f}")
+    
+    # Transaction history
+    with st.expander("📋 Transaction History (Last 10)"):
+        transactions = get_cash_transactions(selected_trader_portfolio, limit=10)
+        if transactions:
+            tx_data = []
+            for tx in transactions:
+                tx_type = tx.get('type', '')
+                amount = float(tx.get('amount', 0))
+                balance = float(tx.get('running_balance', 0))
+                note = tx.get('note', '')
+                timestamp = tx.get('timestamp', '')
+                
+                # Format with emoji
+                if tx_type == 'DEPOSIT':
+                    display_type = '🟢 DEPOSIT'
+                    display_amount = f"+${amount:,.2f}"
+                else:
+                    display_type = '🔴 WITHDRAWAL'
+                    display_amount = f"-${amount:,.2f}"
+                
+                tx_data.append({
+                    'Date': timestamp[:10] if timestamp else '',
+                    'Type': display_type,
+                    'Amount': display_amount,
+                    'Balance': f"${balance:,.2f}",
+                    'Note': note or ''
+                })
+            
+            st.dataframe(pd.DataFrame(tx_data), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No transactions yet. Start by depositing cash!")
     
     st.divider()
     st.subheader("📊 Active Positions")
