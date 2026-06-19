@@ -1354,6 +1354,23 @@ def update_position_after_sell(row_index, sell_contracts, sell_price):
     worksheet.update_cell(row_index + 2, 18, new_sold)
     worksheet.update_cell(row_index + 2, 19, new_realized_pnl)
     
+    # ============================================================
+    # NEW: Add cash back when selling contracts
+    # ============================================================
+    # Get trader name and ticker
+    trader_name = worksheet.cell(row_index + 2, 2).value
+    ticker = worksheet.cell(row_index + 2, 3).value
+    
+    # Add cash back (sell price × contracts × 100)
+    cash_added = sell_price * sell_contracts * 100
+    
+    add_cash_transaction(
+        trader_name,
+        "DEPOSIT",
+        cash_added,
+        f"Sold {sell_contracts} contracts of {ticker} at ${sell_price:.2f}"
+    )
+    
     if new_contracts == 0:
         worksheet.update_cell(row_index + 2, 13, "closed")
     
@@ -1823,10 +1840,6 @@ def get_hybrid_recommendation(option_price, entry_price, target, stop_loss,
 # STEP B: AUTO-CLOSE EXPIRED POSITIONS
 # ========================
 def auto_close_expired_positions():
-    """
-    Check all active positions for expiration and auto-close them.
-    Called on app load/refresh in the Portfolio tab.
-    """
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return 0
@@ -1841,27 +1854,23 @@ def auto_close_expired_positions():
             
         expiry_date = pd.to_datetime(record['expiry']).date()
         
-        # Check if expired (expiry date is before today)
         if expiry_date < today:
-            # Calculate total loss (100% loss for long options)
             contracts = int(record['contracts'])
             entry_price = float(record['entry_price'])
-            total_loss = -(contracts * entry_price * 100)  # 100% loss
+            total_loss = -(contracts * entry_price * 100)
             
-            # Get existing realized P&L (if any partial sells were done)
             existing_realized = float(record.get('realized_pnl', 0))
-            
-            # Row index in sheet (header is row 1, data starts at row 2)
             row_index = idx + 2
             
-            # Update the position
-            worksheet.update_cell(row_index, 6, 0)  # Set contracts to 0
-            worksheet.update_cell(row_index, 13, "closed")  # Mark as closed
-            worksheet.update_cell(row_index, 19, existing_realized + total_loss)  # Realized P&L = total loss
+            worksheet.update_cell(row_index, 6, 0)
+            worksheet.update_cell(row_index, 13, "closed")
+            worksheet.update_cell(row_index, 19, existing_realized + total_loss)
             
-            # Also update sold_contracts to reflect all contracts were effectively sold at $0
             current_sold = int(record.get('sold_contracts', 0))
-            worksheet.update_cell(row_index, 18, current_sold + contracts)  # Mark all as sold
+            worksheet.update_cell(row_index, 18, current_sold + contracts)
+            
+            # NOTE: No cash added back for expired positions (sold at $0)
+            # They simply disappear from the portfolio
             
             closed_count += 1
     
