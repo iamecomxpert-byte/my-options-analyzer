@@ -1176,14 +1176,29 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return False
+    
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    total_cost = contracts * entry_price
+    total_cost = contracts * entry_price  # Cost per contract (not *100 - this is the premium)
+    total_cost_with_multiplier = total_cost * 100  # Total cost including the 100x multiplier
+    
     row = [
         now, trader_name, ticker, strike, expiry, contracts, entry_price,
         target_price, stop_loss, cutoff_date, entry_iv, entry_delta,
         "active", "HOLD", "", total_cost, contracts, 0, 0, entry_price
     ]
     worksheet.append_row(row)
+    
+    # ============================================================
+    # NEW: Auto-reduce cash when position is added
+    # ============================================================
+    # Add a cash withdrawal for the total cost
+    add_cash_transaction(
+        trader_name, 
+        "WITHDRAWAL", 
+        total_cost_with_multiplier, 
+        f"Position: {ticker} {strike} Call, {contracts} contracts"
+    )
+    
     return True
 
 def get_portfolio_positions(trader_name=None):
@@ -1297,7 +1312,23 @@ def update_position_after_add(row_index, additional_contracts, additional_price)
     worksheet.update_cell(row_index + 2, 16, new_total_cost)
     worksheet.update_cell(row_index + 2, 17, new_total_purchased)
     worksheet.update_cell(row_index + 2, 20, new_avg_price)
+
+
+    # ============================================================
+    # NEW: Auto-reduce cash when adding more contracts
+    # ============================================================
+    # Get the ticker and calculate additional cost
+    ticker = worksheet.cell(row_index + 2, 3).value
+    additional_cost = additional_contracts * additional_price * 100
     
+    add_cash_transaction(
+        worksheet.cell(row_index + 2, 2).value,  # trader_name
+        "WITHDRAWAL", 
+        additional_cost, 
+        f"Added {additional_contracts} contracts to {ticker} position"
+    )
+    
+    return True
     return True
 
 def update_position_after_sell(row_index, sell_contracts, sell_price):
