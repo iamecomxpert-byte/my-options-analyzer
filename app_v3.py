@@ -1664,36 +1664,7 @@ with st.sidebar:
     selected_trader = st.selectbox("👤 Select Trader:", trader_options, key="sidebar_trader_select")
     
     st.divider()
-    
-    # --- STEP A: Quick Stats ---
-    st.subheader("📊 Quick Stats")
-    
-    # Get all positions for selected trader
-    all_positions = get_all_positions_for_trader(selected_trader)
-    active_positions = get_portfolio_positions(selected_trader)
-    
-    # Calculate stats
-    total_investment, total_unrealized, total_realized = calculate_portfolio_summary(all_positions)
-    total_pnl = total_unrealized + total_realized
-    
-    # Display stats
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        st.metric("💰 Total Invested", f"${total_investment:,.0f}")
-        st.metric("📊 Positions", f"{len(active_positions)} active")
-    with col_s2:
-        pnl_color = "normal" if total_pnl >= 0 else "inverse"
-        st.metric("💵 Total P&L", f"${total_pnl:+,.0f}", delta_color=pnl_color)
-        # Next expiry
-        if active_positions:
-            next_expiry = min([pd.to_datetime(pos['expiry']).date() for _, pos in active_positions])
-            days_until = (next_expiry - datetime.now().date()).days
-            st.metric("📅 Next Expiry", f"{next_expiry.strftime('%b %d')} ({days_until}d)")
-        else:
-            st.metric("📅 Next Expiry", "No positions")
-    
-    st.divider()
-    
+     
     # --- Analysis Section (OPTIONAL) ---
     st.subheader("🔍 Analysis")
     ticker_input = st.text_input("Ticker:", "SHOP").upper()
