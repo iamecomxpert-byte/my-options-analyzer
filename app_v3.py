@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG MUST BE FIRST ---
-st.set_page_config(page_title="Analyst Pro Options Suite v6", layout="wide")
+st.set_page_config(page_title="Analyst Pro Options Suite v7", layout="wide")
 
 # --- SIMPLE CACHE FOR AI RESPONSES ---
 class SimpleCache:
@@ -2256,7 +2256,7 @@ with t_portfolio:
             except Exception as e:
                 positions_with_risk.append((50.0, idx, row_idx, pos, None, 0.35, 0, 0, 0.5, 0, None, 0, {}, 1.0))
         
-        positions_with_risk.sort(key=lambda x: x[0], reverse=True)
+        positions_with_risk.sort(key=lambda x: (pd.to_datetime(x[3]['expiry']).date(), x[3]['ticker']))
         
         for risk_score, idx, row_idx, pos, option_price, current_iv, gamma, theta, current_delta, days_left, stock_price, ai_score, factor_scores, beta_factor in positions_with_risk:
             entry_price = float(pos['entry_price'])
