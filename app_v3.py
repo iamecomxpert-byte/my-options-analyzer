@@ -663,11 +663,19 @@ def get_earnings_date(ticker):
 
 def calculate_gamma_theta_ratio(gamma, theta):
     """Calculate Gamma/Theta ratio for acceleration potential."""
-    if theta is None or theta == 0:
-        return 0
-    ratio = abs(gamma / theta) if theta != 0 else 0
-    return min(ratio, 3.0)
-
+    # Handle None values
+    if gamma is None or theta is None:
+        return 0.0
+    if theta == 0:
+        return 0.0
+    try:
+        gamma = float(gamma)
+        theta = float(theta)
+        ratio = abs(gamma / theta) if theta != 0 else 0.0
+        return min(ratio, 3.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+        
 def apply_skew_penalty(ev, skew):
     """Apply penalty to EV based on put/call skew."""
     if skew < -0.05:
@@ -681,6 +689,19 @@ def calculate_enhanced_cts(delta, p_touch, gamma_theta_ratio, tech_score):
     Enhanced Composite Score with Gamma/Theta ratio.
     Weights: Delta 30%, Touch Prob 30%, Gamma/Theta 20%, Technical 20%
     """
+    # Ensure all values are numeric and within valid ranges
+    delta = float(delta) if delta is not None else 0.0
+    p_touch = float(p_touch) if p_touch is not None else 0.0
+    gamma_theta_ratio = float(gamma_theta_ratio) if gamma_theta_ratio is not None else 0.0
+    tech_score = float(tech_score) if tech_score is not None else 0.0
+    
+    # Clamp values to valid ranges
+    delta = max(0.0, min(1.0, delta))
+    p_touch = max(0.0, min(1.0, p_touch))
+    gamma_theta_ratio = max(0.0, gamma_theta_ratio)
+    tech_score = max(0.0, min(3.0, tech_score))
+    
+    # Normalize gamma_theta_ratio (cap at 1.0 for the score)
     normalized_gt = min(gamma_theta_ratio / 2.0, 1.0)
     
     cts = (delta * 0.30 + 
