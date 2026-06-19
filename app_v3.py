@@ -2242,7 +2242,8 @@ with t_portfolio:
             if option_price is None:
                 option_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry_date_str, strike)
                 if option_price is None:
-                    option_price = 0                    current_iv = 0.35
+                    option_price = 0
+                    current_iv = 0.35
                     gamma = 0
                     theta = 0
             
