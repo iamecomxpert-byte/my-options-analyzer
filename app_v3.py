@@ -2361,16 +2361,17 @@ with t_portfolio:
                     expected_5d_pnl_pct = ((expected_price_5d / option_price) - 1) * 100
                 except:
                     pass
-            
+
+            # Build the summary with 5-day forecast if available
             if expected_price_5d and expected_5d_pnl is not None:
                 if expected_5d_pnl >= 0:
                     pnl_5d_display = f"🟢 +${expected_5d_pnl:,.0f} (+{expected_5d_pnl_pct:+.1f}%)"
                 else:
                     pnl_5d_display = f"🔴 -${abs(expected_5d_pnl):,.0f} ({expected_5d_pnl_pct:+.1f}%)"
                 
-                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} → ${expected_price_5d:.2f} (5d: {pnl_5d_display}) | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | {contracts} Contracts | ${option_price:.2f} → ${expected_price_5d:.2f} (5d: {pnl_5d_display}) | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
             else:
-                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
+                summary = f"{rec_icon} {ticker} ${strike:.2f} Call | Exp: {expiry_date_str} | {contracts} Contracts | ${option_price:.2f} | P&L: {pnl_pct:+.1f}% (${pnl:+.0f}) | Risk: {risk_indicator}"
             
             with st.expander(summary):
                 st.markdown("### 📊 Position Summary")
