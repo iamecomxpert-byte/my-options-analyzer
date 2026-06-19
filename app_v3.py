@@ -53,10 +53,21 @@ def get_cached_stock_history(ticker, period="100d"):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
+        
+        # Validate the data
+        if hist is None or hist.empty:
+            return pd.DataFrame()
+        
+        if 'Close' not in hist.columns:
+            return pd.DataFrame()
+        
+        # Check if all Close values are NaN
+        if hist['Close'].isna().all():
+            return pd.DataFrame()
+        
         return hist
     except Exception as e:
-        st.error(f"Error fetching stock history: {str(e)}")
-        return None
+        return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_stock_info(ticker):
@@ -70,11 +81,33 @@ def get_cached_stock_info(ticker):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_cached_current_price(ticker):
+    """Get current price with multiple fallback methods"""
     try:
         stock = yf.Ticker(ticker)
+        
+        # Method 1: Get from 1-day history
         hist = stock.history(period="1d")
-        if not hist.empty:
-            return hist['Close'].iloc[-1]
+        if not hist.empty and 'Close' in hist.columns:
+            close_val = hist['Close'].iloc[-1]
+            if pd.notna(close_val):
+                return float(close_val)
+        
+        # Method 2: Get from 5-day history (if 1-day failed)
+        hist_5d = stock.history(period="5d")
+        if not hist_5d.empty and 'Close' in hist_5d.columns:
+            close_val = hist_5d['Close'].iloc[-1]
+            if pd.notna(close_val):
+                return float(close_val)
+        
+        # Method 3: Get from info
+        info = stock.info
+        if info:
+            for key in ['regularMarketPrice', 'currentPrice', 'lastClose', 'previousClose']:
+                if key in info and info[key] is not None:
+                    val = info[key]
+                    if isinstance(val, (int, float)) and pd.notna(val):
+                        return float(val)
+        
         return None
     except Exception as e:
         return None
@@ -1886,7 +1919,25 @@ if fetch_btn:
             st.session_state.price = None
         else:
             st.session_state.hist_data = hist
-            st.session_state.price = hist['Close'].iloc[-1]
+            
+            # Get current price with fallbacks
+            current_price = get_cached_current_price(ticker_input)
+            
+            # If price fetch failed, use last close from history
+            if current_price is None or pd.isna(current_price):
+                if not hist['Close'].isna().all():
+                    current_price = float(hist['Close'].iloc[-1])
+                    st.caption("⚠️ Using last closing price (market may be closed)")
+                else:
+                    st.error(f"❌ Could not determine current price for {ticker_input}")
+                    st.session_state.price = None
+            
+            if current_price is not None and not pd.isna(current_price):
+                st.session_state.price = float(current_price)
+                # ... rest of the code
+            else:
+                st.session_state.price = None
+                st.error(f"❌ No valid price found for {ticker_input}")
             
             stock_info = get_cached_stock_info(ticker_input)
             st.session_name = stock_info.get('longName', ticker_input) if stock_info else ticker_input
