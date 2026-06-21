@@ -3074,6 +3074,21 @@ with t_portfolio:
 # DASHBOARD TAB
 # ========================
 with t_dashboard:
+    # --- SAFE DEFAULTS FOR ALL VARIABLES ---
+    current_price = 0
+    current_rsi = 50.0
+    current_iv_pct = 0
+    current_hv = 0
+    current_iv_hv_spread = 0
+    current_beta = 1.0
+    current_pcr = 0.5
+    current_ema_status = "Neutral"
+    current_bollinger_pos = 50
+    current_term_structure = "Neutral"
+    bollinger_pos = 50
+    market_verdict = "N/A"
+    market_confidence = 0
+    
     # Only show dashboard if ticker data is available
     if st.session_state.price and st.session_state.expiries:
         S = st.session_state.price
@@ -3154,7 +3169,7 @@ with t_dashboard:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
 
-                # ============================================================
+        # ============================================================
         # NEW: TRADING DECISION FRAMEWORK (Option C)
         # ============================================================
         st.divider()
