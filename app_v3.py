@@ -1232,53 +1232,48 @@ def close_position(row_index):
     worksheet.update_cell(row_index + 2, 13, "closed")
 
 def get_trader_list():
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
-        return ["Mukul"]
-    
     try:
+        worksheet = init_portfolio_sheet()
+        if not worksheet:
+            return ["Mukul"]
+        
         # Try to get traders from the Traders sheet
         sheet = get_google_sheet()
         if not sheet:
             return ["Mukul"]
         
+        traders = set()
+        traders.add("Mukul")
+        
+        # Try to get from Traders sheet
         try:
             traders_worksheet = sheet.worksheet("Traders")
             records = traders_worksheet.get_all_records()
-            traders = set()
             for record in records:
                 if record.get('trader_name'):
                     traders.add(record['trader_name'])
-            # Also add traders from Portfolio sheet
-            portfolio_records = worksheet.get_all_records()
-            for record in portfolio_records:
-                if record.get('trader_name'):
-                    traders.add(record['trader_name'])
-            traders.add("Mukul")
-            if not traders:
-                return ["Mukul"]
-            return sorted(list(traders))
         except:
-            # If Traders sheet doesn't exist, get traders from Portfolio sheet
+            pass
+        
+        # Also get from Portfolio sheet
+        try:
             records = worksheet.get_all_records()
-            traders = set()
             for record in records:
                 if record.get('trader_name'):
                     traders.add(record['trader_name'])
-            traders.add("Mukul")
-            if not traders:
-                return ["Mukul"]
-            return sorted(list(traders))
+        except:
+            pass
+        
+        return sorted(list(traders))
     except Exception as e:
-        # If all else fails, return default
         return ["Mukul"]
 
 def add_trader_to_sheet(trader_name, email):
-    sheet = get_google_sheet()
-    if not sheet:
-        return False
-    
     try:
+        sheet = get_google_sheet()
+        if not sheet:
+            return False
+        
         # Check if Traders sheet exists, if not create it
         try:
             traders_worksheet = sheet.worksheet("Traders")
@@ -1299,23 +1294,22 @@ def add_trader_to_sheet(trader_name, email):
     except Exception as e:
         return False
 
-    def get_trader_email(trader_name):
-    sheet = get_google_sheet()
-    if not sheet:
-        return None
-    
+def get_trader_email(trader_name):
     try:
-        try:
-            traders_worksheet = sheet.worksheet("Traders")
-        except:
+        sheet = get_google_sheet()
+        if not sheet:
             return None
         
-        records = traders_worksheet.get_all_records()
-        for record in records:
-            if record.get('trader_name') == trader_name:
-                return record.get('email')
-        return None
-    except:
+        try:
+            traders_worksheet = sheet.worksheet("Traders")
+            records = traders_worksheet.get_all_records()
+            for record in records:
+                if record.get('trader_name') == trader_name:
+                    return record.get('email')
+            return None
+        except:
+            return None
+    except Exception as e:
         return None
 
 
@@ -1369,7 +1363,6 @@ def update_position_after_add(row_index, additional_contracts, additional_price)
         f"Added {additional_contracts} contracts to {ticker} position"
     )
     
-    return True
     return True
 
 def update_position_after_sell(row_index, sell_contracts, sell_price):
