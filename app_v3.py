@@ -1202,7 +1202,6 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     return True
 
 def get_portfolio_positions(trader_name=None):
-    """Get only active positions for a trader"""
     try:
         worksheet = init_portfolio_sheet()
         if not worksheet:
@@ -1210,7 +1209,7 @@ def get_portfolio_positions(trader_name=None):
         
         try:
             records = worksheet.get_all_records()
-        except Exception as e:
+        except Exception:
             return []
         
         positions = []
@@ -1220,21 +1219,18 @@ def get_portfolio_positions(trader_name=None):
                     continue
                 positions.append((idx, record))
         return positions
-    except Exception as e:
+    except Exception:
         return []
 
 def get_all_positions_for_trader(trader_name):
-    """Get all positions (active and closed) for a specific trader"""
     try:
         worksheet = init_portfolio_sheet()
         if not worksheet:
             return []
         
-        # Try to get records with error handling
         try:
             records = worksheet.get_all_records()
-        except Exception as e:
-            # If sheet is empty or has no data, return empty list
+        except Exception:
             return []
         
         positions = []
@@ -1242,7 +1238,7 @@ def get_all_positions_for_trader(trader_name):
             if record.get("trader_name") == trader_name:
                 positions.append(record)
         return positions
-    except Exception as e:
+    except Exception:
         return []
 
 def close_position(row_index):
@@ -1494,85 +1490,78 @@ def add_cash_transaction(trader_name, tx_type, amount, note=""):
     return True
 
 def get_cash_balance(trader_name):
-    """
-    Get current cash balance for a trader
-    
-    Args:
-        trader_name: Name of the trader
-    
-    Returns:
-        Float: Current cash balance
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return 0.0
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return 0.0
+        
+        if not records:
+            return 0.0
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        if not trader_transactions:
+            return 0.0
+        
+        last_tx = trader_transactions[-1]
+        return float(last_tx.get('running_balance', 0))
+    except Exception:
         return 0.0
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return 0.0
-    
-    # Filter by trader and get last transaction
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    if not trader_transactions:
-        return 0.0
-    
-    # Get the last transaction's running balance
-    last_tx = trader_transactions[-1]
-    return float(last_tx.get('running_balance', 0))
 
 def get_cash_transactions(trader_name, limit=10):
-    """
-    Get recent cash transactions for a trader
-    
-    Args:
-        trader_name: Name of the trader
-        limit: Number of transactions to return
-    
-    Returns:
-        List of dictionaries with transaction details
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return []
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return []
+        
+        if not records:
+            return []
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        return trader_transactions[:limit]
+    except Exception:
         return []
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return []
-    
-    # Filter by trader and sort by timestamp (newest first)
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-    
-    return trader_transactions[:limit]
 
 def get_cash_summary(trader_name):
-    """
-    Get cash summary for a trader
-    
-    Returns:
-        Dictionary with cash metrics
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        if not records:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        if not trader_transactions:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
+        total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
+        balance = float(trader_transactions[-1].get('running_balance', 0))
+        
+        return {
+            'balance': balance,
+            'total_deposits': total_deposits,
+            'total_withdrawals': total_withdrawals
+        }
+    except Exception:
         return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    if not trader_transactions:
-        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
-    total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
-    balance = float(trader_transactions[-1].get('running_balance', 0))
-    
-    return {
-        'balance': balance,
-        'total_deposits': total_deposits,
-        'total_withdrawals': total_withdrawals
-    }
 
 def calculate_portfolio_summary(positions_data):
     total_investment = 0
@@ -1580,21 +1569,24 @@ def calculate_portfolio_summary(positions_data):
     total_realized_pnl = 0
     
     for pos in positions_data:
-        if pos.get('status') != 'active':
-            total_realized_pnl += float(pos.get('realized_pnl', 0))
+        try:
+            if pos.get('status') != 'active':
+                total_realized_pnl += float(pos.get('realized_pnl', 0))
+                continue
+            
+            contracts = int(pos['contracts'])
+            entry_price = float(pos['entry_price'])
+            total_investment += contracts * entry_price * 100
+            
+            option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
+            if option_price:
+                unrealized = (option_price - entry_price) * contracts * 100
+                total_unrealized_pnl += unrealized
+            
+            realized = float(pos.get('realized_pnl', 0))
+            total_realized_pnl += realized
+        except Exception:
             continue
-        contracts = int(pos['contracts'])
-        entry_price = float(pos['entry_price'])
-        total_investment += contracts * entry_price * 100
-        
-        # get_current_option_price returns 4 values (mid, iv, gamma, theta)
-        option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
-        if option_price:
-            unrealized = (option_price - entry_price) * contracts * 100
-            total_unrealized_pnl += unrealized
-        
-        realized = float(pos.get('realized_pnl', 0))
-        total_realized_pnl += realized
     
     return total_investment, total_unrealized_pnl, total_realized_pnl
 
@@ -1894,41 +1886,51 @@ def get_hybrid_recommendation(option_price, entry_price, target, stop_loss,
 # STEP B: AUTO-CLOSE EXPIRED POSITIONS
 # ========================
 def auto_close_expired_positions():
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
-        return 0
-    
-    records = worksheet.get_all_records()
-    today = datetime.now().date()
-    closed_count = 0
-    
-    for idx, record in enumerate(records):
-        if record.get("status") != "active":
-            continue
-            
-        expiry_date = pd.to_datetime(record['expiry']).date()
+    try:
+        worksheet = init_portfolio_sheet()
+        if not worksheet:
+            return 0
         
-        if expiry_date < today:
-            contracts = int(record['contracts'])
-            entry_price = float(record['entry_price'])
-            total_loss = -(contracts * entry_price * 100)
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return 0
+        
+        if not records:
+            return 0
+        
+        today = datetime.now().date()
+        closed_count = 0
+        
+        for idx, record in enumerate(records):
+            if record.get("status") != "active":
+                continue
             
-            existing_realized = float(record.get('realized_pnl', 0))
-            row_index = idx + 2
+            try:
+                expiry_date = pd.to_datetime(record['expiry']).date()
+            except:
+                continue
             
-            worksheet.update_cell(row_index, 6, 0)
-            worksheet.update_cell(row_index, 13, "closed")
-            worksheet.update_cell(row_index, 19, existing_realized + total_loss)
-            
-            current_sold = int(record.get('sold_contracts', 0))
-            worksheet.update_cell(row_index, 18, current_sold + contracts)
-            
-            # NOTE: No cash added back for expired positions (sold at $0)
-            # They simply disappear from the portfolio
-            
-            closed_count += 1
-    
-    return closed_count
+            if expiry_date < today:
+                contracts = int(record['contracts'])
+                entry_price = float(record['entry_price'])
+                total_loss = -(contracts * entry_price * 100)
+                
+                existing_realized = float(record.get('realized_pnl', 0))
+                row_index = idx + 2
+                
+                worksheet.update_cell(row_index, 6, 0)
+                worksheet.update_cell(row_index, 13, "closed")
+                worksheet.update_cell(row_index, 19, existing_realized + total_loss)
+                
+                current_sold = int(record.get('sold_contracts', 0))
+                worksheet.update_cell(row_index, 18, current_sold + contracts)
+                
+                closed_count += 1
+        
+        return closed_count
+    except Exception:
+        return 0
 
 # --- PAGE CONFIG & SESSION STATE ---
 state_keys = {
@@ -2005,6 +2007,9 @@ with st.sidebar:
     # Add Position button (opens popup)
     if st.button("➕ Add Position", use_container_width=True):
         st.session_state.show_add_position_popup = True
+
+    # Add this before the Refresh AI button
+    all_positions = get_all_positions_for_trader(selected_trader)
     
     # Refresh AI button
     if st.button("🔄 Refresh AI Forecasts", use_container_width=True):
