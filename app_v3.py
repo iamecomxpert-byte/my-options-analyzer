@@ -3431,7 +3431,7 @@ with t_dashboard:
             Contextual trading recommendation based on market regime and stock conditions.
             Uses weighted factors with market regime adjustment.
             
-            Returns: (recommendation, confidence, summary, entry_zone_low, entry_zone_high, stop_loss, target_price, position_size, rec_color)
+            Returns: dict with recommendation details
             """
             
             # --- Layer 1: Market Regime ---
@@ -3466,65 +3466,65 @@ with t_dashboard:
             price = data.get('price', 100)
             
             # --- Layer 3: Factor Analysis with Weights ---
-            bullish_factors = 0
-            bearish_factors = 0
+            bullish_score = 0
+            bearish_score = 0
             strong_bullish = 0
             strong_bearish = 0
             factor_details = []
             
             # 1. RSI (Weight: 0.25) - Most important
             if rsi < 30:  # Oversold - Strong BUY signal
-                bullish_factors += 2.5
+                bullish_score += 2.5
                 strong_bullish += 1
                 factor_details.append("✅ RSI: OVERSOLD (Strong BUY)")
             elif rsi < 35:  # Nearing oversold - BUY signal
-                bullish_factors += 2.0
+                bullish_score += 2.0
                 strong_bullish += 1
                 factor_details.append("✅ RSI: Nearing oversold (BUY)")
             elif rsi < 40:  # Approaching oversold - LEANING BUY
-                bullish_factors += 1.0
+                bullish_score += 1.0
                 factor_details.append("🟡 RSI: Approaching oversold")
             elif rsi < 45:  # Lower neutral - Mild bullish
-                bullish_factors += 0.5
+                bullish_score += 0.5
                 factor_details.append("🟡 RSI: Lower neutral")
             elif rsi > 70:  # Overbought - Strong SELL
-                bearish_factors += 2.5
+                bearish_score += 2.5
                 strong_bearish += 1
                 factor_details.append("❌ RSI: OVERBOUGHT (Strong SELL)")
             elif rsi > 65:  # Nearing overbought
-                bearish_factors += 1.0
+                bearish_score += 1.0
                 factor_details.append("❌ RSI: Nearing overbought")
             elif rsi > 60:  # Upper neutral - Mild bearish
-                bearish_factors += 0.5
+                bearish_score += 0.5
                 factor_details.append("🟡 RSI: Upper neutral")
             else:
                 factor_details.append("⚪ RSI: Neutral")
             
             # 2. IV/HV Spread (Weight: 0.20) - Options pricing
             if iv_hv_spread < -10:  # Cheap options
-                bullish_factors += 2.0
+                bullish_score += 2.0
                 strong_bullish += 1
                 factor_details.append("✅ IV/HV: CHEAP options (Strong BUY)")
             elif iv_hv_spread < -5:  # Slightly cheap
-                bullish_factors += 1.0
+                bullish_score += 1.0
                 factor_details.append("🟡 IV/HV: Slightly cheap")
             elif iv_hv_spread > 10:  # Expensive options
-                bearish_factors += 1.5
+                bearish_score += 1.5
                 strong_bearish += 1
                 factor_details.append("❌ IV/HV: EXPENSIVE options (Avoid)")
             elif iv_hv_spread > 5:  # Slightly expensive
-                bearish_factors += 0.5
+                bearish_score += 0.5
                 factor_details.append("🟡 IV/HV: Slightly expensive")
             else:
                 factor_details.append("⚪ IV/HV: Fair value")
             
             # 3. EMA Status (Weight: 0.15)
             if ema_status in ["Bullish Cross", "bullish"]:
-                bullish_factors += 1.5
+                bullish_score += 1.5
                 strong_bullish += 1
                 factor_details.append("✅ 8/20 EMA: Bullish (Uptrend)")
             elif ema_status in ["Bearish Separation", "bearish"]:
-                bearish_factors += 1.5
+                bearish_score += 1.5
                 strong_bearish += 1
                 factor_details.append("❌ 8/20 EMA: Bearish (Downtrend)")
             else:
@@ -3532,26 +3532,26 @@ with t_dashboard:
             
             # 4. Market Verdict (Weight: 0.15)
             if "BUY" in market_verdict and market_confidence >= 65:
-                bullish_factors += 1.5
+                bullish_score += 1.5
                 strong_bullish += 1
                 factor_details.append(f"✅ Market Verdict: BUY ({market_confidence:.0f}%)")
             elif "WAIT" in market_verdict:
                 factor_details.append("🟡 Market Verdict: WAIT")
             elif "DROP" in market_verdict:
-                bearish_factors += 1.5
+                bearish_score += 1.5
                 strong_bearish += 1
                 factor_details.append("❌ Market Verdict: DROP")
             
             # 5. Put/Call Ratio (Weight: 0.10)
             if pcr < 0.6:  # Very bullish
-                bullish_factors += 1.5
+                bullish_score += 1.5
                 strong_bullish += 1
                 factor_details.append(f"✅ PCR: Very Bullish ({pcr:.2f})")
             elif pcr < 0.8:  # Bullish
-                bullish_factors += 0.5
+                bullish_score += 0.5
                 factor_details.append(f"🟡 PCR: Bullish ({pcr:.2f})")
             elif pcr > 1.2:  # Bearish
-                bearish_factors += 1.0
+                bearish_score += 1.0
                 strong_bearish += 1
                 factor_details.append(f"❌ PCR: Bearish ({pcr:.2f})")
             else:
@@ -3559,18 +3559,18 @@ with t_dashboard:
             
             # 6. Bollinger Position (Weight: 0.10)
             if bollinger_pos < 20:  # Near lower band - Support
-                bullish_factors += 1.0
+                bullish_score += 1.0
                 strong_bullish += 1
                 factor_details.append(f"✅ Bollinger: Near lower band ({bollinger_pos:.0f}%)")
             elif bollinger_pos < 30:  # Lower half
-                bullish_factors += 0.5
+                bullish_score += 0.5
                 factor_details.append(f"🟡 Bollinger: Lower half ({bollinger_pos:.0f}%)")
             elif bollinger_pos > 80:  # Near upper band - Resistance
-                bearish_factors += 1.0
+                bearish_score += 1.0
                 strong_bearish += 1
                 factor_details.append(f"❌ Bollinger: Near upper band ({bollinger_pos:.0f}%)")
             elif bollinger_pos > 70:  # Upper half
-                bearish_factors += 0.5
+                bearish_score += 0.5
                 factor_details.append(f"🟡 Bollinger: Upper half ({bollinger_pos:.0f}%)")
             else:
                 factor_details.append(f"⚪ Bollinger: Middle range ({bollinger_pos:.0f}%)")
@@ -3587,7 +3587,7 @@ with t_dashboard:
                 factor_details.append(f"🟢 Risk: Normal BETA ({beta:.2f})")
             
             # --- Calculate Net Score ---
-            net_score = bullish_factors - bearish_factors
+            net_score = bullish_score - bearish_score
             
             # Apply risk penalty
             net_score = net_score - risk_penalty
@@ -3652,7 +3652,7 @@ with t_dashboard:
             elif beta > 1.2:
                 position_size = "Half (50%)"
                 position_emoji = "🟢"
-            elif len(bearish_factors) >= 3:
+            elif bearish_score >= 2.0:
                 position_size = "Half (50%)"
                 position_emoji = "🟢"
             else:
@@ -3722,8 +3722,8 @@ with t_dashboard:
                 'target_price': round(target_price, 2),
                 'position_size': position_size,
                 'position_emoji': position_emoji,
-                'bullish_factors': bullish_factors,
-                'bearish_factors': bearish_factors,
+                'bullish_score': bullish_score,
+                'bearish_score': bearish_score,
                 'net_score': net_score,
                 'regime': regime_desc,
                 'factor_details': factor_details,
@@ -3801,10 +3801,10 @@ with t_dashboard:
             # Show score breakdown
             col_bull, col_bear, col_net = st.columns(3)
             with col_bull:
-                st.metric("Bullish Factors", f"{decision['bullish_factors']:.1f}", 
+                st.metric("Bullish Score", f"{decision['bullish_score']:.1f}", 
                          delta=f"Strong: {decision['strong_bullish']}")
             with col_bear:
-                st.metric("Bearish Factors", f"{decision['bearish_factors']:.1f}", 
+                st.metric("Bearish Score", f"{decision['bearish_score']:.1f}", 
                          delta=f"Strong: {decision['strong_bearish']}")
             with col_net:
                 net_color = "normal" if decision['net_score'] >= 0 else "inverse"
@@ -4208,7 +4208,6 @@ Keep it professional, concise, and actionable. Focus on the intersection of macr
                 st.rerun()
     else:
         st.info("👈 Analyze a ticker to see the Dashboard")
-
 
 # ========================
 # ANALYSIS TAB (NEW - Replaces old main view)
