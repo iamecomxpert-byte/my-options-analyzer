@@ -538,6 +538,55 @@ def get_market_events_today():
     except:
         return []
 
+def get_stock_news(ticker, limit=5):
+    """
+    Get recent news for a specific stock using Finnhub
+    
+    Args:
+        ticker: Stock ticker symbol
+        limit: Number of news articles to return
+    
+    Returns:
+        List of news articles with headlines and summaries
+    """
+    try:
+        api_key = st.secrets.get("FINNHUB_API_KEY")
+        if not api_key:
+            return []
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=7)
+        
+        url = "https://finnhub.io/api/v1/company-news"
+        params = {
+            'symbol': ticker,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'token': api_key
+        }
+        response = requests.get(url, params=params)
+        
+        if response.status_code != 200:
+            return []
+        
+        articles = response.json()
+        if not articles:
+            return []
+        
+        # Format and return top articles
+        formatted_news = []
+        for item in articles[:limit]:
+            formatted_news.append({
+                'headline': item.get('headline', 'No title'),
+                'summary': item.get('summary', '')[:200],
+                'source': item.get('source', 'Unknown'),
+                'datetime': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d %H:%M'),
+                'url': item.get('url', '#')
+            })
+        
+        return formatted_news
+    except Exception as e:
+        return []
 
 def get_ai_forecast_for_position(ticker, current_price, strike, current_iv):
     """
@@ -3703,6 +3752,22 @@ MACRO CONTEXT:
                         source = article.get('source', 'Unknown')
                         events_context += f"{i+1}. {headline} ({source})\n"
 
+                # --- NEW: Get stock-specific news ---
+                stock_news_context = ""
+                stock_news = get_stock_news(st.session_state.current_ticker, limit=5)
+                if stock_news:
+                    stock_news_context = f"\n{st.session_state.current_ticker}-SPECIFIC NEWS (Last 7 Days):\n"
+                    for i, article in enumerate(stock_news):
+                        headline = article.get('headline', 'No title')
+                        summary = article.get('summary', '')[:150]
+                        source = article.get('source', 'Unknown')
+                        date = article.get('datetime', '')
+                        stock_news_context += f"{i+1}. {headline}\n"
+                        stock_news_context += f"   Summary: {summary}\n"
+                        stock_news_context += f"   Source: {source} | Date: {date}\n\n"
+                else:
+                    stock_news_context = f"\nNo recent news found for {st.session_state.current_ticker} in the last 7 days.\n"
+                
                 # Build the enhanced AI prompt
                 ai_prompt = f"""
 You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {st.session_state.current_ticker}, provide a concise trading insight.
@@ -3730,6 +3795,7 @@ SENTIMENT METRICS:
 
 {macro_context}
 {sector_performance}
+{stock_news_context}
 {events_context}
 
 MY RECOMMENDATION: {decision['recommendation']}
@@ -3741,10 +3807,11 @@ MY RECOMMENDATION: {decision['recommendation']}
 Provide a 3-4 sentence insight that:
 1. Acknowledges the macro environment and how it affects this trade
 2. Mentions the sector context and any relevant sector trends
-3. Explains the key reason for the recommendation
-4. Gives a clear, actionable takeaway
+3. INCORPORATES ANY RECENT STOCK-SPECIFIC NEWS OR CATALYSTS (this is critical!)
+4. Explains the key reason for the recommendation
+5. Gives a clear, actionable takeaway
 
-Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, and this specific stock.
+Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, and this specific stock.
 """
                 
                 try:
