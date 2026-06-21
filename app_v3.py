@@ -1235,41 +1235,81 @@ def get_trader_list():
     worksheet = init_portfolio_sheet()
     if not worksheet:
         return ["Mukul"]
-    records = worksheet.get_all_records()
-    traders = set()
-    for record in records:
-        if record.get('trader_name'):
-            traders.add(record['trader_name'])
-    traders.add("Mukul")
-    if not traders:
+    
+    try:
+        # Try to get traders from the Traders sheet
+        sheet = get_google_sheet()
+        if not sheet:
+            return ["Mukul"]
+        
+        try:
+            traders_worksheet = sheet.worksheet("Traders")
+            records = traders_worksheet.get_all_records()
+            traders = set()
+            for record in records:
+                if record.get('trader_name'):
+                    traders.add(record['trader_name'])
+            # Also add traders from Portfolio sheet
+            portfolio_records = worksheet.get_all_records()
+            for record in portfolio_records:
+                if record.get('trader_name'):
+                    traders.add(record['trader_name'])
+            traders.add("Mukul")
+            if not traders:
+                return ["Mukul"]
+            return sorted(list(traders))
+        except:
+            # If Traders sheet doesn't exist, get traders from Portfolio sheet
+            records = worksheet.get_all_records()
+            traders = set()
+            for record in records:
+                if record.get('trader_name'):
+                    traders.add(record['trader_name'])
+            traders.add("Mukul")
+            if not traders:
+                return ["Mukul"]
+            return sorted(list(traders))
+    except Exception as e:
+        # If all else fails, return default
         return ["Mukul"]
-    return sorted(list(traders))
 
 def add_trader_to_sheet(trader_name, email):
     sheet = get_google_sheet()
     if not sheet:
         return False
+    
     try:
-        traders_worksheet = sheet.worksheet("Traders")
-    except:
-        traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
-        traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
-    
-    existing = traders_worksheet.findall(trader_name)
-    if existing:
+        # Check if Traders sheet exists, if not create it
+        try:
+            traders_worksheet = sheet.worksheet("Traders")
+        except:
+            traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
+            traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
+        
+        # Check if trader already exists
+        existing = traders_worksheet.findall(trader_name)
+        if existing:
+            return False
+        
+        # Add new trader
+        traders_worksheet.append_row([
+            trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ])
+        return True
+    except Exception as e:
         return False
-    
-    traders_worksheet.append_row([
-        trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ])
-    return True
 
-def get_trader_email(trader_name):
+    def get_trader_email(trader_name):
     sheet = get_google_sheet()
     if not sheet:
         return None
+    
     try:
-        traders_worksheet = sheet.worksheet("Traders")
+        try:
+            traders_worksheet = sheet.worksheet("Traders")
+        except:
+            return None
+        
         records = traders_worksheet.get_all_records()
         for record in records:
             if record.get('trader_name') == trader_name:
@@ -1277,6 +1317,7 @@ def get_trader_email(trader_name):
         return None
     except:
         return None
+
 
 # --- PORTFOLIO MANAGEMENT FUNCTIONS ---
 def update_position_after_add(row_index, additional_contracts, additional_price):
