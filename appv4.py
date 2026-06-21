@@ -456,6 +456,138 @@ def calculate_portfolio_forecast(positions, st_price=None):
         'position_forecasts': position_forecasts
     }
 
+# ========================
+# MACRO & SECTOR CONTEXT FUNCTIONS
+# ========================
+
+def get_macro_data():
+    """Fetch macro-level data for AI context"""
+    macro_data = {}
+    
+    # VIX
+    macro_data['vix'] = get_vix()
+    
+    # Market regime
+    regime_text, regime_desc = get_market_regime(macro_data['vix'])
+    macro_data['regime'] = regime_text
+    macro_data['regime_description'] = regime_desc
+    
+    # SPY performance (market benchmark)
+    try:
+        spy = yf.Ticker("SPY")
+        spy_hist = spy.history(period="5d")
+        if not spy_hist.empty:
+            spy_close = spy_hist['Close']
+            macro_data['spy_change_5d'] = round(((spy_close.iloc[-1] / spy_close.iloc[0]) - 1) * 100, 1)
+            macro_data['spy_price'] = round(spy_close.iloc[-1], 2)
+    except:
+        macro_data['spy_change_5d'] = 0
+        macro_data['spy_price'] = 0
+    
+    # Sector ETFs (relevant to quantum computing/semiconductor stocks)
+    sector_etfs = {
+        'Semiconductors': 'SMH',
+        'Technology': 'XLK',
+        'Quantum/Computing': 'QTUM',
+    }
+    
+    sector_data = {}
+    for sector_name, etf_ticker in sector_etfs.items():
+        try:
+            etf = yf.Ticker(etf_ticker)
+            etf_hist = etf.history(period="5d")
+            if not etf_hist.empty:
+                etf_close = etf_hist['Close']
+                sector_data[sector_name] = {
+                    'change_5d': round(((etf_close.iloc[-1] / etf_close.iloc[0]) - 1) * 100, 1),
+                    'price': round(etf_close.iloc[-1], 2)
+                }
+        except:
+            pass
+    
+    macro_data['sector_data'] = sector_data
+    
+    return macro_data
+
+def get_sector_for_ticker(ticker):
+    """Get sector and industry for a ticker"""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return info.get('sector', 'Unknown'), info.get('industry', 'Unknown')
+    except:
+        return 'Unknown', 'Unknown'
+
+def get_market_events_today():
+    """Get major market events/news headlines"""
+    try:
+        api_key = st.secrets.get("FINNHUB_API_KEY")
+        if not api_key:
+            return []
+        
+        url = "https://finnhub.io/api/v1/news"
+        params = {
+            'category': 'general',
+            'token': api_key
+        }
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            articles = response.json()
+            return articles[:3]  # Top 3 headlines
+        return []
+    except:
+        return []
+
+def get_stock_news(ticker, limit=5):
+    """
+    Get recent news for a specific stock using Finnhub
+    
+    Args:
+        ticker: Stock ticker symbol
+        limit: Number of news articles to return
+    
+    Returns:
+        List of news articles with headlines and summaries
+    """
+    try:
+        api_key = st.secrets.get("FINNHUB_API_KEY")
+        if not api_key:
+            return []
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=7)
+        
+        url = "https://finnhub.io/api/v1/company-news"
+        params = {
+            'symbol': ticker,
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'token': api_key
+        }
+        response = requests.get(url, params=params)
+        
+        if response.status_code != 200:
+            return []
+        
+        articles = response.json()
+        if not articles:
+            return []
+        
+        # Format and return top articles
+        formatted_news = []
+        for item in articles[:limit]:
+            formatted_news.append({
+                'headline': item.get('headline', 'No title'),
+                'summary': item.get('summary', '')[:200],
+                'source': item.get('source', 'Unknown'),
+                'datetime': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d %H:%M'),
+                'url': item.get('url', '#')
+            })
+        
+        return formatted_news
+    except Exception as e:
+        return []
+
 def get_ai_forecast_for_position(ticker, current_price, strike, current_iv):
     """
     Get cached AI sentiment for a specific ticker.
@@ -3088,6 +3220,9 @@ with t_dashboard:
     bollinger_pos = 50
     market_verdict = "N/A"
     market_confidence = 0
+    pc_ratio = 0.5
+    weighted_verdict = "N/A"
+    weighted_confidence = 0
     
     # Only show dashboard if ticker data is available
     if st.session_state.price and st.session_state.expiries:
@@ -3152,6 +3287,87 @@ with t_dashboard:
         except:
             skew = 0
         
+        # --- GET TECHNICALS (DEFINES 'curr' and 'ema_status') ---
+        curr, prev = get_technicals(hist_data)
+        ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
+        term_structure = "Neutral"  # Default, or get from calculate_term_structure()
+        
+        # --- GET PUT/CALL RATIO ---
+        pc_ratio = 0.5
+        try:
+            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
+                st.session_state.current_ticker, current_expiry
+            )
+            if pc_ratio is None:
+                pc_ratio = 0.5
+        except:
+            pc_ratio = 0.5
+
+        # ============================================================
+        # NEW: MARKET CONTEXT SECTION
+        # ============================================================
+        st.divider()
+        st.subheader("🌍 Market Context")
+        
+        # Get macro data
+        macro_data = get_macro_data()
+        sector, industry = get_sector_for_ticker(st.session_state.current_ticker)
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        
+        with col_m1:
+            st.metric("VIX (Fear Index)", f"{macro_data.get('vix', 15):.1f}", 
+                     delta=macro_data.get('regime', 'Neutral'))
+            
+            if macro_data.get('spy_change_5d') is not None:
+                spy_color = "normal" if macro_data['spy_change_5d'] >= 0 else "inverse"
+                st.metric("SPY (5-Day)", f"${macro_data.get('spy_price', 0):.2f}", 
+                         delta=f"{macro_data.get('spy_change_5d', 0):+.1f}%", 
+                         delta_color=spy_color)
+        
+        with col_m2:
+            st.metric("Sector", sector)
+            st.metric("Industry", industry)
+            
+            # Sector performance - show relevant sectors
+            if macro_data.get('sector_data'):
+                for sector_name, data in macro_data['sector_data'].items():
+                    if sector_name in ["Semiconductors", "Technology", "Quantum/Computing"]:
+                        delta_color = "normal" if data['change_5d'] >= 0 else "inverse"
+                        st.metric(f"{sector_name} (5D)", f"{data['change_5d']:+.1f}%", 
+                                 delta_color=delta_color)
+        
+        with col_m3:
+            # Earnings
+            if earnings_date:
+                if days_to_earnings < 0:
+                    st.metric("📅 Next Earnings", "Recently passed")
+                elif days_to_earnings < 7:
+                    st.warning(f"⚠️ Earnings in {days_to_earnings} days")
+                    st.metric("📅 Next Earnings", f"In {days_to_earnings} days", 
+                             delta="HIGH RISK")
+                else:
+                    st.metric("📅 Next Earnings", f"In {days_to_earnings} days", 
+                             delta=f"{earnings_date.strftime('%b %d')}")
+            else:
+                st.metric("📅 Next Earnings", "N/A")
+            
+            # Quick market events button
+            if st.button("📰 Market Events", use_container_width=True):
+                events = get_market_events_today()
+                if events:
+                    with st.expander("📰 Top Market Headlines", expanded=True):
+                        for article in events[:3]:
+                            headline = article.get('headline', '')
+                            if len(headline) > 80:
+                                headline = headline[:80] + "..."
+                            st.write(f"• {headline}")
+                            st.caption(f"  Source: {article.get('source', 'Unknown')}")
+                else:
+                    st.info("No market events found")
+
+        # --- NOW SHOW MARKET VERDICT ---
+        st.divider()
         st.subheader("🎯 Market Verdict")
         
         strict_verdict, strict_passed, strict_confidence = calculate_strict_verdict(
@@ -3170,29 +3386,12 @@ with t_dashboard:
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
 
         # ============================================================
-        # NEW: TRADING DECISION FRAMEWORK (Option C)
+        # TRADING DECISION FRAMEWORK (Option C)
         # ============================================================
         st.divider()
         st.subheader("🎯 Trading Decision Framework")
         
-        # --- Gather all metrics for decision ---
-        # Get Put/Call Ratio FIRST (so it's defined for everything else)
-        pc_ratio = 0.5  # Default
-        pc_sentiment = "Neutral"
-        pc_interpretation = "Balanced"
-        call_vol = 0
-        put_vol = 0
-        
-        try:
-            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
-                st.session_state.current_ticker, current_expiry
-            )
-            if pc_ratio is None:
-                pc_ratio = 0.5
-        except:
-            pc_ratio = 0.5
-        
-        # Get current values
+        # --- ALL VARIABLES ARE NOW DEFINED ---
         current_price = S
         current_rsi = rsi_val
         current_iv_pct = current_iv * 100 if current_iv else 0
@@ -3518,12 +3717,63 @@ with t_dashboard:
                 with col_o3:
                     st.metric("Stop Loss", f"${atm_stop:.2f}")
         
-        # --- Groq AI Insight ---
+        # ============================================================
+        # ENHANCED GROQ AI INSIGHT WITH MACRO CONTEXT
+        # ============================================================
         with st.expander("🤖 AI Insight (Powered by Groq)", expanded=False):
-            with st.spinner("Generating AI insights..."):
-                # Build prompt for Groq
+            with st.spinner("Gathering market context and generating AI insights..."):
+                
+                # Get sector and macro data for enhanced prompt
+                sector, industry = get_sector_for_ticker(st.session_state.current_ticker)
+                
+                # Build macro context
+                macro_context = f"""
+MACRO CONTEXT:
+- VIX: {macro_data.get('vix', 15):.1f} ({macro_data.get('regime', 'Neutral')})
+- SPY 5-Day Change: {macro_data.get('spy_change_5d', 0):+.1f}%
+- Market Regime: {macro_data.get('regime_description', 'Normal')}
+- Earnings: {f"Next earnings in {days_to_earnings} days" if earnings_date and days_to_earnings > 0 else "No upcoming earnings" if not earnings_date else f"Earnings {abs(days_to_earnings)} days ago"}
+"""
+
+                # Build sector performance context
+                sector_performance = ""
+                if macro_data.get('sector_data'):
+                    sector_performance = "SECTOR PERFORMANCE (5-Day):\n"
+                    for sector_name, data in macro_data['sector_data'].items():
+                        sector_performance += f"- {sector_name}: {data['change_5d']:+.1f}%\n"
+
+                # Build market events context
+                events_context = ""
+                market_events = get_market_events_today()
+                if market_events:
+                    events_context = "TOP MARKET EVENTS TODAY:\n"
+                    for i, article in enumerate(market_events[:3]):
+                        headline = article.get('headline', '')[:100]
+                        source = article.get('source', 'Unknown')
+                        events_context += f"{i+1}. {headline} ({source})\n"
+
+                # --- NEW: Get stock-specific news ---
+                stock_news_context = ""
+                stock_news = get_stock_news(st.session_state.current_ticker, limit=5)
+                if stock_news:
+                    stock_news_context = f"\n{st.session_state.current_ticker}-SPECIFIC NEWS (Last 7 Days):\n"
+                    for i, article in enumerate(stock_news):
+                        headline = article.get('headline', 'No title')
+                        summary = article.get('summary', '')[:150]
+                        source = article.get('source', 'Unknown')
+                        date = article.get('datetime', '')
+                        stock_news_context += f"{i+1}. {headline}\n"
+                        stock_news_context += f"   Summary: {summary}\n"
+                        stock_news_context += f"   Source: {source} | Date: {date}\n\n"
+                else:
+                    stock_news_context = f"\nNo recent news found for {st.session_state.current_ticker} in the last 7 days.\n"
+                
+                # Build the enhanced AI prompt
                 ai_prompt = f"""
-You are a professional options trader and quantitative analyst. Based on the following data for {st.session_state.current_ticker} (Rigetti Computing), provide a concise trading insight.
+You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {st.session_state.current_ticker}, provide a concise trading insight.
+
+TICKER: {st.session_state.current_ticker}
+SECTOR: {sector} | INDUSTRY: {industry}
 
 TECHNICAL METRICS:
 - Price: ${S:.2f}
@@ -3543,18 +3793,25 @@ SENTIMENT METRICS:
 - Put/Call Ratio: {pc_ratio if pc_ratio else 0.5:.2f}
 - Market Verdict: {weighted_verdict} ({weighted_confidence:.0f}% confidence)
 
+{macro_context}
+{sector_performance}
+{stock_news_context}
+{events_context}
+
 MY RECOMMENDATION: {decision['recommendation']}
 - Entry Zone: ${decision['entry_zone_low']:.2f} - ${decision['entry_zone_high']:.2f}
 - Stop Loss: ${decision['stop_loss']:.2f}
 - Target: ${decision['target_price']:.2f}
 - Position Size: {decision['position_size']}
 
-Provide a 2-3 sentence insight that:
-1. Briefly explains the key reason for this recommendation
-2. Mentions the most important factor driving the decision
-3. Gives a clear, actionable takeaway
+Provide a 3-4 sentence insight that:
+1. Acknowledges the macro environment and how it affects this trade
+2. Mentions the sector context and any relevant sector trends
+3. INCORPORATES ANY RECENT STOCK-SPECIFIC NEWS OR CATALYSTS (this is critical!)
+4. Explains the key reason for the recommendation
+5. Gives a clear, actionable takeaway
 
-Keep it professional, concise, and actionable. Do not repeat all the metrics - focus on the key insight.
+Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, and this specific stock.
 """
                 
                 try:
