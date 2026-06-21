@@ -1202,7 +1202,6 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     return True
 
 def get_portfolio_positions(trader_name=None):
-    """Get only active positions for a trader"""
     try:
         worksheet = init_portfolio_sheet()
         if not worksheet:
@@ -1210,7 +1209,7 @@ def get_portfolio_positions(trader_name=None):
         
         try:
             records = worksheet.get_all_records()
-        except Exception as e:
+        except Exception:
             return []
         
         positions = []
@@ -1220,21 +1219,18 @@ def get_portfolio_positions(trader_name=None):
                     continue
                 positions.append((idx, record))
         return positions
-    except Exception as e:
+    except Exception:
         return []
 
 def get_all_positions_for_trader(trader_name):
-    """Get all positions (active and closed) for a specific trader"""
     try:
         worksheet = init_portfolio_sheet()
         if not worksheet:
             return []
         
-        # Try to get records with error handling
         try:
             records = worksheet.get_all_records()
-        except Exception as e:
-            # If sheet is empty or has no data, return empty list
+        except Exception:
             return []
         
         positions = []
@@ -1242,7 +1238,7 @@ def get_all_positions_for_trader(trader_name):
             if record.get("trader_name") == trader_name:
                 positions.append(record)
         return positions
-    except Exception as e:
+    except Exception:
         return []
 
 def close_position(row_index):
@@ -1494,85 +1490,78 @@ def add_cash_transaction(trader_name, tx_type, amount, note=""):
     return True
 
 def get_cash_balance(trader_name):
-    """
-    Get current cash balance for a trader
-    
-    Args:
-        trader_name: Name of the trader
-    
-    Returns:
-        Float: Current cash balance
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return 0.0
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return 0.0
+        
+        if not records:
+            return 0.0
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        if not trader_transactions:
+            return 0.0
+        
+        last_tx = trader_transactions[-1]
+        return float(last_tx.get('running_balance', 0))
+    except Exception:
         return 0.0
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return 0.0
-    
-    # Filter by trader and get last transaction
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    if not trader_transactions:
-        return 0.0
-    
-    # Get the last transaction's running balance
-    last_tx = trader_transactions[-1]
-    return float(last_tx.get('running_balance', 0))
 
 def get_cash_transactions(trader_name, limit=10):
-    """
-    Get recent cash transactions for a trader
-    
-    Args:
-        trader_name: Name of the trader
-        limit: Number of transactions to return
-    
-    Returns:
-        List of dictionaries with transaction details
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return []
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return []
+        
+        if not records:
+            return []
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        return trader_transactions[:limit]
+    except Exception:
         return []
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return []
-    
-    # Filter by trader and sort by timestamp (newest first)
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-    
-    return trader_transactions[:limit]
 
 def get_cash_summary(trader_name):
-    """
-    Get cash summary for a trader
-    
-    Returns:
-        Dictionary with cash metrics
-    """
-    worksheet = init_cash_sheet()
-    if not worksheet:
+    try:
+        worksheet = init_cash_sheet()
+        if not worksheet:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        if not records:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
+        if not trader_transactions:
+            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
+        
+        total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
+        total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
+        balance = float(trader_transactions[-1].get('running_balance', 0))
+        
+        return {
+            'balance': balance,
+            'total_deposits': total_deposits,
+            'total_withdrawals': total_withdrawals
+        }
+    except Exception:
         return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    records = worksheet.get_all_records()
-    if not records:
-        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-    if not trader_transactions:
-        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-    
-    total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
-    total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
-    balance = float(trader_transactions[-1].get('running_balance', 0))
-    
-    return {
-        'balance': balance,
-        'total_deposits': total_deposits,
-        'total_withdrawals': total_withdrawals
-    }
 
 def calculate_portfolio_summary(positions_data):
     total_investment = 0
@@ -1580,21 +1569,24 @@ def calculate_portfolio_summary(positions_data):
     total_realized_pnl = 0
     
     for pos in positions_data:
-        if pos.get('status') != 'active':
-            total_realized_pnl += float(pos.get('realized_pnl', 0))
+        try:
+            if pos.get('status') != 'active':
+                total_realized_pnl += float(pos.get('realized_pnl', 0))
+                continue
+            
+            contracts = int(pos['contracts'])
+            entry_price = float(pos['entry_price'])
+            total_investment += contracts * entry_price * 100
+            
+            option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
+            if option_price:
+                unrealized = (option_price - entry_price) * contracts * 100
+                total_unrealized_pnl += unrealized
+            
+            realized = float(pos.get('realized_pnl', 0))
+            total_realized_pnl += realized
+        except Exception:
             continue
-        contracts = int(pos['contracts'])
-        entry_price = float(pos['entry_price'])
-        total_investment += contracts * entry_price * 100
-        
-        # get_current_option_price returns 4 values (mid, iv, gamma, theta)
-        option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
-        if option_price:
-            unrealized = (option_price - entry_price) * contracts * 100
-            total_unrealized_pnl += unrealized
-        
-        realized = float(pos.get('realized_pnl', 0))
-        total_realized_pnl += realized
     
     return total_investment, total_unrealized_pnl, total_realized_pnl
 
@@ -1894,41 +1886,51 @@ def get_hybrid_recommendation(option_price, entry_price, target, stop_loss,
 # STEP B: AUTO-CLOSE EXPIRED POSITIONS
 # ========================
 def auto_close_expired_positions():
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
-        return 0
-    
-    records = worksheet.get_all_records()
-    today = datetime.now().date()
-    closed_count = 0
-    
-    for idx, record in enumerate(records):
-        if record.get("status") != "active":
-            continue
-            
-        expiry_date = pd.to_datetime(record['expiry']).date()
+    try:
+        worksheet = init_portfolio_sheet()
+        if not worksheet:
+            return 0
         
-        if expiry_date < today:
-            contracts = int(record['contracts'])
-            entry_price = float(record['entry_price'])
-            total_loss = -(contracts * entry_price * 100)
+        try:
+            records = worksheet.get_all_records()
+        except Exception:
+            return 0
+        
+        if not records:
+            return 0
+        
+        today = datetime.now().date()
+        closed_count = 0
+        
+        for idx, record in enumerate(records):
+            if record.get("status") != "active":
+                continue
             
-            existing_realized = float(record.get('realized_pnl', 0))
-            row_index = idx + 2
+            try:
+                expiry_date = pd.to_datetime(record['expiry']).date()
+            except:
+                continue
             
-            worksheet.update_cell(row_index, 6, 0)
-            worksheet.update_cell(row_index, 13, "closed")
-            worksheet.update_cell(row_index, 19, existing_realized + total_loss)
-            
-            current_sold = int(record.get('sold_contracts', 0))
-            worksheet.update_cell(row_index, 18, current_sold + contracts)
-            
-            # NOTE: No cash added back for expired positions (sold at $0)
-            # They simply disappear from the portfolio
-            
-            closed_count += 1
-    
-    return closed_count
+            if expiry_date < today:
+                contracts = int(record['contracts'])
+                entry_price = float(record['entry_price'])
+                total_loss = -(contracts * entry_price * 100)
+                
+                existing_realized = float(record.get('realized_pnl', 0))
+                row_index = idx + 2
+                
+                worksheet.update_cell(row_index, 6, 0)
+                worksheet.update_cell(row_index, 13, "closed")
+                worksheet.update_cell(row_index, 19, existing_realized + total_loss)
+                
+                current_sold = int(record.get('sold_contracts', 0))
+                worksheet.update_cell(row_index, 18, current_sold + contracts)
+                
+                closed_count += 1
+        
+        return closed_count
+    except Exception:
+        return 0
 
 # --- PAGE CONFIG & SESSION STATE ---
 state_keys = {
@@ -2005,6 +2007,9 @@ with st.sidebar:
     # Add Position button (opens popup)
     if st.button("➕ Add Position", use_container_width=True):
         st.session_state.show_add_position_popup = True
+
+    # Add this before the Refresh AI button
+    all_positions = get_all_positions_for_trader(selected_trader)
     
     # Refresh AI button
     if st.button("🔄 Refresh AI Forecasts", use_container_width=True):
@@ -3069,6 +3074,21 @@ with t_portfolio:
 # DASHBOARD TAB
 # ========================
 with t_dashboard:
+    # --- SAFE DEFAULTS FOR ALL VARIABLES ---
+    current_price = 0
+    current_rsi = 50.0
+    current_iv_pct = 0
+    current_hv = 0
+    current_iv_hv_spread = 0
+    current_beta = 1.0
+    current_pcr = 0.5
+    current_ema_status = "Neutral"
+    current_bollinger_pos = 50
+    current_term_structure = "Neutral"
+    bollinger_pos = 50
+    market_verdict = "N/A"
+    market_confidence = 0
+    
     # Only show dashboard if ticker data is available
     if st.session_state.price and st.session_state.expiries:
         S = st.session_state.price
@@ -3148,6 +3168,411 @@ with t_dashboard:
         with col_v2:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
+
+        # ============================================================
+        # NEW: TRADING DECISION FRAMEWORK (Option C)
+        # ============================================================
+        st.divider()
+        st.subheader("🎯 Trading Decision Framework")
+        
+        # --- Gather all metrics for decision ---
+        # Get Put/Call Ratio FIRST (so it's defined for everything else)
+        pc_ratio = 0.5  # Default
+        pc_sentiment = "Neutral"
+        pc_interpretation = "Balanced"
+        call_vol = 0
+        put_vol = 0
+        
+        try:
+            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
+                st.session_state.current_ticker, current_expiry
+            )
+            if pc_ratio is None:
+                pc_ratio = 0.5
+        except:
+            pc_ratio = 0.5
+        
+        # Get current values
+        current_price = S
+        current_rsi = rsi_val
+        current_iv_pct = current_iv * 100 if current_iv else 0
+        current_hv = hv_val
+        current_iv_hv_spread = iv_hv_spread
+        current_beta = beta
+        current_pcr = pc_ratio
+        current_ema_status = ema_status
+        current_bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
+        current_term_structure = term_structure if term_structure else "Neutral"
+        bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
+        market_verdict = weighted_verdict
+        market_confidence = weighted_confidence
+        
+        # Get ATM option info if available
+        atm_strike = None
+        atm_entry = None
+        atm_target = None
+        atm_stop = None
+        atm_delta = None
+        
+        if current_expiry:
+            calls_df, _ = get_cached_option_chain(st.session_state.current_ticker, current_expiry)
+            if calls_df is not None and not calls_df.empty:
+                atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
+                atm_row = calls_df.iloc[atm_idx].iloc[0]
+                atm_strike = atm_row['strike']
+                atm_entry = (atm_row['bid'] + atm_row['ask']) / 2 if atm_row['bid'] > 0 else atm_row['lastPrice']
+                atm_target = atm_entry * (1 + profit_target_pct / 100)
+                atm_stop = atm_entry * (1 - stop_loss_pct / 100)
+                atm_delta = atm_row.get('delta', None)
+        
+        # --- Generate Recommendation using Logic + Groq ---
+        def generate_trading_recommendation(data):
+            """
+            Generate trading recommendation based on quantitative factors.
+            Returns: (recommendation, color, summary, entry_zone, stop_loss, target, position_size, bullish_factors, bearish_factors)
+            """
+            # Initialize factors
+            bullish_factors = []
+            bearish_factors = []
+            
+            # 1. IV/HV Spread
+            if data['iv_hv_spread'] < -10:
+                bullish_factors.append(f"IV/HV Spread: {data['iv_hv_spread']:.1f}% (Options are CHEAP)")
+            elif data['iv_hv_spread'] > 10:
+                bearish_factors.append(f"IV/HV Spread: {data['iv_hv_spread']:.1f}% (Options are EXPENSIVE)")
+            else:
+                bullish_factors.append(f"IV/HV Spread: {data['iv_hv_spread']:.1f}% (Fair value)")
+            
+            # 2. Put/Call Ratio
+            if data['pcr'] < 0.8:
+                bullish_factors.append(f"Put/Call Ratio: {data['pcr']:.2f} (Bullish sentiment)")
+            elif data['pcr'] > 1.2:
+                bearish_factors.append(f"Put/Call Ratio: {data['pcr']:.2f} (Bearish sentiment)")
+            else:
+                bullish_factors.append(f"Put/Call Ratio: {data['pcr']:.2f} (Neutral sentiment)")
+            
+            # 3. RSI
+            if data['rsi'] < 30:
+                bullish_factors.append(f"RSI: {data['rsi']:.1f} (OVERSOLD - Buy signal)")
+            elif data['rsi'] > 70:
+                bearish_factors.append(f"RSI: {data['rsi']:.1f} (OVERBOUGHT - Sell signal)")
+            elif data['rsi'] < 40:
+                bullish_factors.append(f"RSI: {data['rsi']:.1f} (Nearing oversold)")
+            elif data['rsi'] > 60:
+                bearish_factors.append(f"RSI: {data['rsi']:.1f} (Nearing overbought)")
+            else:
+                bullish_factors.append(f"RSI: {data['rsi']:.1f} (Neutral zone)")
+            
+            # 4. EMA Status
+            if data['ema_status'] in ["Bullish Cross", "bullish"]:
+                bullish_factors.append(f"8/20 EMA: Bullish (Uptrend confirmed)")
+            elif data['ema_status'] in ["Bearish Separation", "bearish"]:
+                bearish_factors.append(f"8/20 EMA: Bearish (Downtrend)")
+            else:
+                bullish_factors.append(f"8/20 EMA: Neutral")
+            
+            # 5. Beta
+            if data['beta'] < 0.8:
+                bullish_factors.append(f"Beta: {data['beta']:.2f} (Low volatility - Defensive)")
+            elif data['beta'] > 1.5:
+                bearish_factors.append(f"Beta: {data['beta']:.2f} (HIGH volatility - Risk)")
+            elif data['beta'] > 1.2:
+                bearish_factors.append(f"Beta: {data['beta']:.2f} (Elevated volatility)")
+            else:
+                bullish_factors.append(f"Beta: {data['beta']:.2f} (Market-like volatility)")
+            
+            # 6. Term Structure
+            if "Contango" in data['term_structure']:
+                bullish_factors.append(f"Term Structure: {data['term_structure']} (Normal)")
+            elif "Backwardation" in data['term_structure']:
+                bearish_factors.append(f"Term Structure: {data['term_structure']} (Market stress)")
+            
+            # 7. Bollinger Position
+            if data['bollinger_pos'] < 20:
+                bullish_factors.append(f"Bollinger Position: {data['bollinger_pos']:.0f}% (Near lower band - Support)")
+            elif data['bollinger_pos'] > 80:
+                bearish_factors.append(f"Bollinger Position: {data['bollinger_pos']:.0f}% (Near upper band - Resistance)")
+            else:
+                bullish_factors.append(f"Bollinger Position: {data['bollinger_pos']:.0f}% (Middle range)")
+            
+            # 8. Market Verdict
+            if "BUY" in data['market_verdict'] and data['market_confidence'] >= 65:
+                bullish_factors.append(f"Market Verdict: BUY ({data['market_confidence']:.0f}% confidence)")
+            elif "DROP" in data['market_verdict']:
+                bearish_factors.append(f"Market Verdict: DROP")
+            
+            # --- Calculate Recommendation ---
+            score = len(bullish_factors) - len(bearish_factors)
+            total_factors = len(bullish_factors) + len(bearish_factors)
+            if total_factors == 0:
+                total_factors = 1
+            
+            # Position size recommendation
+            if data['beta'] > 1.5:
+                position_size = "Quarter (25%)"
+                position_emoji = "🟡"
+            elif data['beta'] > 1.2:
+                position_size = "Half (50%)"
+                position_emoji = "🟢"
+            elif len(bearish_factors) >= 3:
+                position_size = "Half (50%)"
+                position_emoji = "🟢"
+            else:
+                position_size = "Full (100%)"
+                position_emoji = "🟢"
+            
+            # Entry zone calculation
+            if data['rsi'] < 30:
+                # Oversold - current price may be good entry
+                entry_zone_low = data['price'] * 0.97
+                entry_zone_high = data['price'] * 1.02
+            elif data['rsi'] < 40:
+                # Nearing oversold - wait for small pullback
+                entry_zone_low = data['price'] * 0.92
+                entry_zone_high = data['price'] * 0.97
+            elif data['ema_status'] in ["Bearish Separation", "bearish"]:
+                # Downtrend - wait for larger pullback
+                entry_zone_low = data['price'] * 0.88
+                entry_zone_high = data['price'] * 0.94
+            else:
+                entry_zone_low = data['price'] * 0.95
+                entry_zone_high = data['price'] * 0.98
+            
+            # Stop loss (wider for high volatility)
+            if data['beta'] > 1.5:
+                stop_pct = 0.18  # 18% stop for high beta
+            elif data['beta'] > 1.2:
+                stop_pct = 0.12  # 12% stop for elevated beta
+            else:
+                stop_pct = 0.08  # 8% stop for normal beta
+            
+            stop_loss = data['price'] * (1 - stop_pct)
+            
+            # Target (based on volatility)
+            if data['iv_hv_spread'] < -10:
+                # Cheap options - higher target potential
+                target_pct = 0.15
+            elif data['rsi'] < 30:
+                # Oversold - bounce potential
+                target_pct = 0.12
+            else:
+                target_pct = 0.08
+            
+            target_price = data['price'] * (1 + target_pct)
+            
+            # --- Determine Recommendation ---
+            # Count strong factors
+            strong_bullish = sum(1 for f in bullish_factors if any(keyword in f.lower() for keyword in ['cheap', 'oversold', 'bullish', 'buy', 'support']))
+            strong_bearish = sum(1 for f in bearish_factors if any(keyword in f.lower() for keyword in ['expensive', 'overbought', 'bearish', 'sell', 'resistance', 'stress', 'downtrend']))
+            
+            if strong_bearish >= 3 and strong_bullish == 0:
+                recommendation = "🔴 AVOID"
+                rec_color = "red"
+                summary = "Strong bearish signals - stay away"
+            elif strong_bearish >= 3 and strong_bullish >= 2:
+                recommendation = "🟡 WAIT FOR BETTER ENTRY"
+                rec_color = "orange"
+                summary = "Mixed signals - wait for confirmation"
+            elif strong_bearish >= 2 and strong_bullish >= 2:
+                recommendation = "🟡 WAIT FOR CONFIRMATION"
+                rec_color = "orange"
+                summary = "Mixed signals - wait for bullish crossover"
+            elif strong_bullish >= 3 and strong_bearish == 0:
+                recommendation = "🟢 STRONG BUY"
+                rec_color = "green"
+                summary = "Strong bullish signals - excellent entry"
+            elif strong_bullish >= 2:
+                recommendation = "🟢 BUY"
+                rec_color = "green"
+                summary = "Favorable conditions - consider entry"
+            elif len(bullish_factors) > len(bearish_factors) + 1:
+                recommendation = "🟡 LEANING BUY - WAIT"
+                rec_color = "orange"
+                summary = "More bullish than bearish, but wait for confirmation"
+            else:
+                recommendation = "🟡 NEUTRAL - MONITOR"
+                rec_color = "orange"
+                summary = "Monitor for clearer signals"
+            
+            return {
+                'recommendation': recommendation,
+                'rec_color': rec_color,
+                'summary': summary,
+                'entry_zone_low': round(entry_zone_low, 2),
+                'entry_zone_high': round(entry_zone_high, 2),
+                'stop_loss': round(stop_loss, 2),
+                'target_price': round(target_price, 2),
+                'position_size': position_size,
+                'position_emoji': position_emoji,
+                'bullish_factors': bullish_factors,
+                'bearish_factors': bearish_factors,
+                'score': score,
+                'total_factors': total_factors
+            }
+        
+        # Prepare data for recommendation
+        decision_data = {
+            'price': S,
+            'rsi': rsi_val,
+            'iv_hv_spread': iv_hv_spread,
+            'pcr': pc_ratio if pc_ratio else 0.5,
+            'beta': beta,
+            'ema_status': ema_status,
+            'bollinger_pos': bollinger_pos,
+            'term_structure': term_structure if term_structure else "Neutral",
+            'market_verdict': weighted_verdict,
+            'market_confidence': weighted_confidence,
+            'atm_strike': atm_strike,
+            'atm_entry': atm_entry,
+            'atm_target': atm_target,
+            'atm_stop': atm_stop
+        }
+        
+        # Generate recommendation
+        decision = generate_trading_recommendation(decision_data)
+        
+        # --- Display Recommendation ---
+        # Color mapping
+        color_map = {
+            'green': '#28a745',
+            'orange': '#ff9800',
+            'red': '#dc3545'
+        }
+        bg_color_map = {
+            'green': 'rgba(40, 167, 69, 0.15)',
+            'orange': 'rgba(255, 152, 0, 0.15)',
+            'red': 'rgba(220, 53, 69, 0.15)'
+        }
+        
+        rec_color = decision['rec_color']
+        
+        st.markdown(f"""
+        <div style="border: 2px solid {color_map[rec_color]}; padding: 20px; border-radius: 10px; background-color: {bg_color_map[rec_color]}; margin-bottom: 15px;">
+            <h3 style="margin:0; color:{color_map[rec_color]};">{decision['recommendation']}</h3>
+            <p style="margin:5px 0 0 0; font-size:1.1rem;">{decision['summary']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # --- Quick Summary Cards ---
+        col_q1, col_q2, col_q3, col_q4 = st.columns(4)
+        with col_q1:
+            st.metric("📊 Market Environment", f"{market_verdict}", delta=f"{market_confidence:.0f}% confidence")
+        with col_q2:
+            st.metric("🎯 Entry Zone", f"${decision['entry_zone_low']:.2f} - ${decision['entry_zone_high']:.2f}")
+        with col_q3:
+            st.metric("🛑 Stop Loss", f"${decision['stop_loss']:.2f}")
+        with col_q4:
+            st.metric("🎯 Target", f"${decision['target_price']:.2f}", delta=f"{((decision['target_price']/S)-1)*100:.1f}%")
+        
+        # --- Expandable: Why This Recommendation ---
+        with st.expander("📊 Why This Recommendation (Click to expand)", expanded=False):
+            st.markdown("**Decision Drivers**")
+            
+            col_bull, col_bear = st.columns(2)
+            with col_bull:
+                st.markdown("#### ✅ Bullish Factors")
+                if decision['bullish_factors']:
+                    for factor in decision['bullish_factors'][:5]:
+                        st.write(f"- {factor}")
+                else:
+                    st.write("- No bullish factors identified")
+            
+            with col_bear:
+                st.markdown("#### ❌ Bearish Factors")
+                if decision['bearish_factors']:
+                    for factor in decision['bearish_factors'][:5]:
+                        st.write(f"- {factor}")
+                else:
+                    st.write("- No bearish factors identified")
+            
+            # Score bar
+            score_pct = ((decision['score'] + decision['total_factors']) / (decision['total_factors'] * 2)) * 100
+            st.markdown(f"**Decision Score:** {score_pct:.0f}% (Bullish vs Bearish)")
+            st.progress(score_pct / 100)
+        
+        # --- Expandable: Execution Plan ---
+        with st.expander("📋 Execution Plan (Click to expand)", expanded=False):
+            st.markdown("#### 🎯 Recommended Trade Setup")
+            
+            col_e1, col_e2, col_e3 = st.columns(3)
+            with col_e1:
+                st.metric("Entry Zone", f"${decision['entry_zone_low']:.2f} - ${decision['entry_zone_high']:.2f}")
+                st.caption(f"Current: ${S:.2f} ({((decision['entry_zone_high']/S)-1)*100:.1f}% below current)")
+            with col_e2:
+                st.metric("Stop Loss", f"${decision['stop_loss']:.2f}")
+                st.caption(f"Risk: ${decision['stop_loss']:.2f} ({((decision['stop_loss']/S)-1)*100:.1f}%)")
+            with col_e3:
+                st.metric("Target", f"${decision['target_price']:.2f}")
+                st.caption(f"Reward: ${decision['target_price']:.2f} ({((decision['target_price']/S)-1)*100:.1f}%)")
+            
+            st.divider()
+            st.markdown(f"#### 📊 Position Size: {decision['position_emoji']} {decision['position_size']}")
+            
+            if atm_entry and atm_strike:
+                st.markdown("#### 📈 Option Contract Recommendation")
+                col_o1, col_o2, col_o3 = st.columns(3)
+                with col_o1:
+                    st.metric("Strike", f"${atm_strike:.2f} Call")
+                with col_o2:
+                    st.metric("Entry Price", f"${atm_entry:.2f}")
+                with col_o3:
+                    st.metric("Stop Loss", f"${atm_stop:.2f}")
+        
+        # --- Groq AI Insight ---
+        with st.expander("🤖 AI Insight (Powered by Groq)", expanded=False):
+            with st.spinner("Generating AI insights..."):
+                # Build prompt for Groq
+                ai_prompt = f"""
+You are a professional options trader and quantitative analyst. Based on the following data for {st.session_state.current_ticker} (Rigetti Computing), provide a concise trading insight.
+
+TECHNICAL METRICS:
+- Price: ${S:.2f}
+- RSI (14d): {rsi_val:.1f}
+- 8/20 EMA Status: {ema_status}
+- Bollinger Position: {bollinger_pos:.0f}% of band
+- Trend: {st.session_state.trend}
+
+VOLATILITY METRICS:
+- Implied Volatility (IV): {current_iv_pct:.1f}%
+- Historical Volatility (HV): {current_hv:.1f}%
+- IV/HV Spread: {iv_hv_spread:.1f}%
+- Beta (vs SPY): {beta:.2f}
+- Term Structure: {term_structure if term_structure else "Neutral"}
+
+SENTIMENT METRICS:
+- Put/Call Ratio: {pc_ratio if pc_ratio else 0.5:.2f}
+- Market Verdict: {weighted_verdict} ({weighted_confidence:.0f}% confidence)
+
+MY RECOMMENDATION: {decision['recommendation']}
+- Entry Zone: ${decision['entry_zone_low']:.2f} - ${decision['entry_zone_high']:.2f}
+- Stop Loss: ${decision['stop_loss']:.2f}
+- Target: ${decision['target_price']:.2f}
+- Position Size: {decision['position_size']}
+
+Provide a 2-3 sentence insight that:
+1. Briefly explains the key reason for this recommendation
+2. Mentions the most important factor driving the decision
+3. Gives a clear, actionable takeaway
+
+Keep it professional, concise, and actionable. Do not repeat all the metrics - focus on the key insight.
+"""
+                
+                try:
+                    # Get Groq API key
+                    groq_api_key = st.secrets.get("GROQ_API_KEY")
+                    if groq_api_key:
+                        client = Groq(api_key=groq_api_key)
+                        response = call_groq_with_retry(client, ai_prompt)
+                        
+                        if response:
+                            st.markdown(f"**🧠 AI Insight:**\n\n{response}")
+                        else:
+                            st.info("AI insight temporarily unavailable. Please try again later.")
+                    else:
+                        st.info("Groq API key not configured. AI insights are unavailable.")
+                except Exception as e:
+                    st.info("AI insight temporarily unavailable. Please try again later.")
+
         
         if 'saved_path_icon' in st.session_state and st.session_state.saved_path_icon:
             path_icon = st.session_state.saved_path_icon
