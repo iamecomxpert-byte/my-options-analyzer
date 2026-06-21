@@ -3154,13 +3154,29 @@ with t_dashboard:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
 
-        # ============================================================
+                # ============================================================
         # NEW: TRADING DECISION FRAMEWORK (Option C)
         # ============================================================
         st.divider()
         st.subheader("🎯 Trading Decision Framework")
         
         # --- Gather all metrics for decision ---
+        # Get Put/Call Ratio FIRST (so it's defined for everything else)
+        pc_ratio = 0.5  # Default
+        pc_sentiment = "Neutral"
+        pc_interpretation = "Balanced"
+        call_vol = 0
+        put_vol = 0
+        
+        try:
+            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
+                st.session_state.current_ticker, current_expiry
+            )
+            if pc_ratio is None:
+                pc_ratio = 0.5
+        except:
+            pc_ratio = 0.5
+        
         # Get current values
         current_price = S
         current_rsi = rsi_val
@@ -3168,7 +3184,7 @@ with t_dashboard:
         current_hv = hv_val
         current_iv_hv_spread = iv_hv_spread
         current_beta = beta
-        current_pcr = pc_ratio if pc_ratio else 0.5
+        current_pcr = pc_ratio
         current_ema_status = ema_status
         current_bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
         current_term_structure = term_structure if term_structure else "Neutral"
@@ -3176,13 +3192,6 @@ with t_dashboard:
         market_verdict = weighted_verdict
         market_confidence = weighted_confidence
         
-        # Get Put/Call Ratio
-        pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
-            st.session_state.current_ticker, current_expiry
-        )
-        if pc_ratio is None:
-            pc_ratio = 0.5
-            
         # Get ATM option info if available
         atm_strike = None
         atm_entry = None
