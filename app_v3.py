@@ -3074,35 +3074,6 @@ with t_portfolio:
 # DASHBOARD TAB
 # ========================
 with t_dashboard:
-    
-    # --- Gather all metrics for decision ---
-    # Get current values with safe defaults
-    current_price = S
-    current_rsi = rsi_val
-    current_iv_pct = current_iv * 100 if current_iv else 0
-    current_hv = hv_val
-    current_iv_hv_spread = iv_hv_spread
-    current_beta = beta
-    current_ema_status = ema_status
-    current_term_structure = term_structure if term_structure else "Neutral"
-    market_verdict = weighted_verdict
-    market_confidence = weighted_confidence
-    
-    # Bollinger Position
-    bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
-    
-    # Put/Call Ratio with safe default
-    pc_ratio = 0.5
-    try:
-        pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
-            st.session_state.current_ticker, current_expiry
-        )
-        if pc_ratio is None:
-            pc_ratio = 0.5
-    except:
-        pc_ratio = 0.5
-    
-    current_pcr = pc_ratio
     # Only show dashboard if ticker data is available
     if st.session_state.price and st.session_state.expiries:
         S = st.session_state.price
