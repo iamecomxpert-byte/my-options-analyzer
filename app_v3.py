@@ -1202,28 +1202,48 @@ def add_position_to_sheet(trader_name, ticker, strike, expiry, contracts, entry_
     return True
 
 def get_portfolio_positions(trader_name=None):
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
+    """Get only active positions for a trader"""
+    try:
+        worksheet = init_portfolio_sheet()
+        if not worksheet:
+            return []
+        
+        try:
+            records = worksheet.get_all_records()
+        except Exception as e:
+            return []
+        
+        positions = []
+        for idx, record in enumerate(records):
+            if record.get("status") == "active":
+                if trader_name and record.get("trader_name") != trader_name:
+                    continue
+                positions.append((idx, record))
+        return positions
+    except Exception as e:
         return []
-    records = worksheet.get_all_records()
-    positions = []
-    for idx, record in enumerate(records):
-        if record.get("status") == "active":
-            if trader_name and record.get("trader_name") != trader_name:
-                continue
-            positions.append((idx, record))
-    return positions
 
 def get_all_positions_for_trader(trader_name):
-    worksheet = init_portfolio_sheet()
-    if not worksheet:
+    """Get all positions (active and closed) for a specific trader"""
+    try:
+        worksheet = init_portfolio_sheet()
+        if not worksheet:
+            return []
+        
+        # Try to get records with error handling
+        try:
+            records = worksheet.get_all_records()
+        except Exception as e:
+            # If sheet is empty or has no data, return empty list
+            return []
+        
+        positions = []
+        for record in records:
+            if record.get("trader_name") == trader_name:
+                positions.append(record)
+        return positions
+    except Exception as e:
         return []
-    records = worksheet.get_all_records()
-    positions = []
-    for record in records:
-        if record.get("trader_name") == trader_name:
-            positions.append(record)
-    return positions
 
 def close_position(row_index):
     worksheet = init_portfolio_sheet()
