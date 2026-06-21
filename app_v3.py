@@ -3070,6 +3070,7 @@ with t_portfolio:
                     else:
                         st.error("❌ Failed to save. Check Google Sheets connection.")
 
+
 # ========================
 # DASHBOARD TAB
 # ========================
@@ -3088,6 +3089,9 @@ with t_dashboard:
     bollinger_pos = 50
     market_verdict = "N/A"
     market_confidence = 0
+    pc_ratio = 0.5
+    weighted_verdict = "N/A"
+    weighted_confidence = 0
     
     # Only show dashboard if ticker data is available
     if st.session_state.price and st.session_state.expiries:
@@ -3152,6 +3156,23 @@ with t_dashboard:
         except:
             skew = 0
         
+        # --- GET TECHNICALS (DEFINES 'curr' and 'ema_status') ---
+        curr, prev = get_technicals(hist_data)
+        ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
+        term_structure = "Neutral"  # Default, or get from calculate_term_structure()
+        
+        # --- GET PUT/CALL RATIO ---
+        pc_ratio = 0.5
+        try:
+            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
+                st.session_state.current_ticker, current_expiry
+            )
+            if pc_ratio is None:
+                pc_ratio = 0.5
+        except:
+            pc_ratio = 0.5
+        
+        # --- NOW SHOW MARKET VERDICT ---
         st.subheader("🎯 Market Verdict")
         
         strict_verdict, strict_passed, strict_confidence = calculate_strict_verdict(
@@ -3175,24 +3196,7 @@ with t_dashboard:
         st.divider()
         st.subheader("🎯 Trading Decision Framework")
         
-        # --- Gather all metrics for decision ---
-        # Get Put/Call Ratio FIRST (so it's defined for everything else)
-        pc_ratio = 0.5  # Default
-        pc_sentiment = "Neutral"
-        pc_interpretation = "Balanced"
-        call_vol = 0
-        put_vol = 0
-        
-        try:
-            pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(
-                st.session_state.current_ticker, current_expiry
-            )
-            if pc_ratio is None:
-                pc_ratio = 0.5
-        except:
-            pc_ratio = 0.5
-        
-        # Get current values
+        # --- ALL VARIABLES ARE NOW DEFINED ---
         current_price = S
         current_rsi = rsi_val
         current_iv_pct = current_iv * 100 if current_iv else 0
@@ -3200,7 +3204,7 @@ with t_dashboard:
         current_iv_hv_spread = iv_hv_spread
         current_beta = beta
         current_pcr = pc_ratio
-        current_ema_status = ema_status
+        current_ema_status = ema_status  # ✅ Now defined!
         current_bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
         current_term_structure = term_structure if term_structure else "Neutral"
         bollinger_pos = ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50
