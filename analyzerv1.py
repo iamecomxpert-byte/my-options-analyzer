@@ -326,133 +326,6 @@ def estimate_iv_percentile(current_iv, hv):
     except Exception:
         return 50
 
-def get_combined_recommendation(quant_score, ai_score, option_price, stop_loss, days_left):
-    """
-    Combine quantitative score and AI sentiment for position recommendation.
-    
-    Returns: (recommendation_icon, reason, combined_score)
-    """
-    if option_price <= stop_loss:
-        return "🔴 EXIT", "Stop loss triggered", 0
-    
-    # Normalize AI score from -1..1 to 0..100
-    ai_score_normalized = (ai_score + 1) * 50
-    
-    # Weighted combination: 60% quant, 40% AI
-    combined_score = (quant_score * 0.6) + (ai_score_normalized * 0.4)
-    
-    # Time decay urgency
-    if days_left < 3:
-        combined_score *= 0.7
-        time_note = " | URGENT: <3 days left"
-    else:
-        time_note = ""
-    
-    if combined_score >= 70 and ai_score >= 0.3:
-        return "🟢 STRONG HOLD", f"Quant: {quant_score}/100 | AI: {ai_score:+.2f}{time_note}", combined_score
-    elif combined_score >= 55:
-        return "🔵 HOLD", f"Maintain position | Combined: {combined_score:.0f}{time_note}", combined_score
-    elif combined_score >= 40:
-        return "🟡 MONITOR", f"Mixed signals | Tighten stops{time_note}", combined_score
-    elif combined_score >= 25:
-        return "🟠 CONSIDER EXIT", f"Quant weak ({quant_score}) or AI bearish{time_note}", combined_score
-    else:
-        return "🔴 EXIT", f"Strong exit signals | Combined: {combined_score:.0f}{time_note}", combined_score
-
-def calculate_portfolio_forecast(positions, st_price=None):
-    """
-    Aggregate 5-day forecasts for all active positions.
-    
-    Returns dictionary with aggregated metrics.
-    """
-    if not positions:
-        return None
-    
-    total_current_value = 0
-    total_forecast_value = 0
-    total_theta_decay = 0
-    positions_improving = 0
-    positions_declining = 0
-    
-    position_forecasts = []
-    
-    for pos in positions:
-        try:
-            ticker = pos['ticker']
-            expiry = pos['expiry']
-            strike = float(pos['strike'])
-            contracts = int(pos['contracts'])
-            entry_price = float(pos['entry_price'])
-            
-            # Get current option price and Greeks
-            current_price, current_iv, gamma, theta = get_current_option_price(ticker, expiry, strike)
-            
-            if current_price and current_price > 0:
-                # Get stock price
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="20d")
-                if not hist.empty:
-                    current_stock = hist['Close'].iloc[-1]
-                    
-                    # Calculate delta for this contract
-                    days_left = max((pd.to_datetime(expiry).date() - datetime.now().date()).days, 1)
-                    d, _, _, _ = calculate_greeks(current_stock, strike, days_left/365, 0.05, current_iv)
-                    
-                    # ========== FIXED: Correct forecast with all 12 parameters ==========
-                    expected_price, _, _, theta_decay, _, _ = forecast_5day_price(
-                        current_price,      # current_option_price
-                        current_stock,      # stock_price  
-                        strike,             # strike
-                        d,                  # delta
-                        gamma,              # gamma
-                        theta,              # theta
-                        0,                  # vega (not used in portfolio aggregate)
-                        current_iv,         # current_iv
-                        0,                  # forecast_iv_change
-                        5,                  # days
-                        0.03                # expected_stock_move_pct (3%)
-                    )
-                    # ================================================================
-                    
-                    position_value = current_price * contracts * 100
-                    forecast_value = expected_price * contracts * 100
-                    
-                    total_current_value += position_value
-                    total_forecast_value += forecast_value
-                    total_theta_decay += abs(theta_decay) * contracts * 100
-                    
-                    if forecast_value > position_value:
-                        positions_improving += 1
-                    else:
-                        positions_declining += 1
-                    
-                    position_forecasts.append({
-                        'ticker': ticker,
-                        'current': position_value,
-                        'forecast': forecast_value,
-                        'improving': forecast_value > position_value
-                    })
-        except Exception as e:
-            continue
-    
-    if total_current_value == 0:
-        return None
-    
-    expected_change = total_forecast_value - total_current_value
-    expected_change_pct = (expected_change / total_current_value) * 100
-    
-    return {
-        'total_current_value': total_current_value,
-        'total_forecast_value': total_forecast_value,
-        'expected_change': expected_change,
-        'expected_change_pct': expected_change_pct,
-        'total_theta_decay_5d': total_theta_decay,
-        'positions_improving': positions_improving,
-        'positions_declining': positions_declining,
-        'total_positions': len(positions),
-        'position_forecasts': position_forecasts
-    }
-
 # ========================
 # MACRO & SECTOR CONTEXT FUNCTIONS
 # ========================
@@ -584,34 +457,6 @@ def get_stock_news(ticker, limit=5):
         return formatted_news
     except Exception as e:
         return []
-
-def get_ai_forecast_for_position(ticker, current_price, strike, current_iv):
-    """
-    Get cached AI sentiment for a specific ticker.
-    Returns sentiment dict or None.
-    """
-    # Check if we have cached AI for this ticker
-    cache_key = f"news_sentiment_{ticker}"
-    cached_sentiment = st.session_state.ai_cache.get(cache_key)
-    
-    if cached_sentiment:
-        # Try to parse sentiment data from cached response
-        try:
-            # The cached response is HTML/markdown, need to extract sentiment
-            # For now, return the stored sentiment from session state
-            if hasattr(st.session_state, 'current_sentiment') and st.session_state.current_sentiment:
-                return st.session_state.current_sentiment
-        except:
-            pass
-    
-    # Return default neutral sentiment
-    return {
-        'sentiment_score': 0.0,
-        'sentiment_label': 'Neutral',
-        'catalyst': None,
-        'key_themes': ['No recent news'],
-        'risk_adjustment': 0
-    }
 
 # ========================
 # PUT/CALL RATIO & BETA ADJUSTMENT
@@ -1268,380 +1113,8 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
     }
 
 # ========================
-# GOOGLE SHEETS CONNECTION (KEPT FOR CASH AND TRADER MANAGEMENT, BUT POSITION FUNCTIONS REMOVED)
+# GROQ RETRY LOGIC
 # ========================
-@st.cache_resource
-def get_google_sheet():
-    try:
-        creds_json = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
-        creds_dict = json.loads(creds_json)
-        scope = ["https://www.spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        client = gspread.authorize(creds)
-        sheet_id = st.secrets["SPREADSHEET_ID"]
-        sheet = client.open_by_key(sheet_id)
-        return sheet
-    except Exception as e:
-        st.error(f"Failed to connect to Google Sheets: {str(e)}")
-        return None
-
-def init_portfolio_sheet():
-    sheet = get_google_sheet()
-    if not sheet:
-        return None
-    try:
-        worksheet = sheet.worksheet("Portfolio")
-    except:
-        worksheet = sheet.add_worksheet(title="Portfolio", rows="1000", cols="25")
-        headers = [
-            "timestamp", "trader_name", "ticker", "strike", "expiry", 
-            "contracts", "entry_price", "target_price", "stop_loss", "cutoff_date",
-            "entry_iv", "entry_delta", "status", "last_recommendation", "last_alert_sent",
-            "total_cost", "total_contracts_purchased", "sold_contracts", "realized_pnl", "avg_entry_price"
-        ]
-        worksheet.append_row(headers)
-    return worksheet
-
-def get_trader_list():
-    try:
-        worksheet = init_portfolio_sheet()
-        if not worksheet:
-            return ["Mukul"]
-        
-        # Try to get traders from the Traders sheet
-        sheet = get_google_sheet()
-        if not sheet:
-            return ["Mukul"]
-        
-        traders = set()
-        traders.add("Mukul")
-        
-        # Try to get from Traders sheet
-        try:
-            traders_worksheet = sheet.worksheet("Traders")
-            records = traders_worksheet.get_all_records()
-            for record in records:
-                if record.get('trader_name'):
-                    traders.add(record['trader_name'])
-        except:
-            pass
-        
-        # Also get from Portfolio sheet
-        try:
-            records = worksheet.get_all_records()
-            for record in records:
-                if record.get('trader_name'):
-                    traders.add(record['trader_name'])
-        except:
-            pass
-        
-        return sorted(list(traders))
-    except Exception as e:
-        return ["Mukul"]
-
-def add_trader_to_sheet(trader_name, email):
-    try:
-        sheet = get_google_sheet()
-        if not sheet:
-            return False
-        
-        # Check if Traders sheet exists, if not create it
-        try:
-            traders_worksheet = sheet.worksheet("Traders")
-        except:
-            traders_worksheet = sheet.add_worksheet(title="Traders", rows="100", cols="10")
-            traders_worksheet.append_row(["trader_name", "email", "enabled", "created_at"])
-        
-        # Check if trader already exists
-        existing = traders_worksheet.findall(trader_name)
-        if existing:
-            return False
-        
-        # Add new trader
-        traders_worksheet.append_row([
-            trader_name, email, "TRUE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ])
-        return True
-    except Exception as e:
-        return False
-
-def get_trader_email(trader_name):
-    try:
-        sheet = get_google_sheet()
-        if not sheet:
-            return None
-        
-        try:
-            traders_worksheet = sheet.worksheet("Traders")
-            records = traders_worksheet.get_all_records()
-            for record in records:
-                if record.get('trader_name') == trader_name:
-                    return record.get('email')
-            return None
-        except:
-            return None
-    except Exception as e:
-        return None
-
-def get_portfolio_positions(trader_name=None):
-    try:
-        worksheet = init_portfolio_sheet()
-        if not worksheet:
-            return []
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return []
-        
-        positions = []
-        for idx, record in enumerate(records):
-            if record.get("status") == "active":
-                if trader_name and record.get("trader_name") != trader_name:
-                    continue
-                positions.append((idx, record))
-        return positions
-    except Exception:
-        return []
-
-def get_all_positions_for_trader(trader_name):
-    try:
-        worksheet = init_portfolio_sheet()
-        if not worksheet:
-            return []
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return []
-        
-        positions = []
-        for record in records:
-            if record.get("trader_name") == trader_name:
-                positions.append(record)
-        return positions
-    except Exception:
-        return []
-
-# --- CASH MANAGEMENT FUNCTIONS ---
-
-def init_cash_sheet():
-    """Initialize the Cash sheet if it doesn't exist"""
-    sheet = get_google_sheet()
-    if not sheet:
-        return None
-    try:
-        worksheet = sheet.worksheet("Cash")
-    except:
-        worksheet = sheet.add_worksheet(title="Cash", rows="1000", cols="10")
-        headers = [
-            "timestamp", "trader_name", "type", "amount", 
-            "running_balance", "note", "transaction_id"
-        ]
-        worksheet.append_row(headers)
-    return worksheet
-
-def add_cash_transaction(trader_name, tx_type, amount, note=""):
-    """
-    Add a cash transaction (DEPOSIT or WITHDRAWAL)
-    
-    Args:
-        trader_name: Name of the trader
-        tx_type: "DEPOSIT" or "WITHDRAWAL"
-        amount: Dollar amount (positive for both)
-        note: Optional description
-    """
-    if amount <= 0:
-        st.warning(f"Amount must be greater than 0")
-        return False
-    
-    worksheet = init_cash_sheet()
-    if not worksheet:
-        return False
-    
-    # Get current balance
-    current_balance = get_cash_balance(trader_name)
-    
-    # Calculate new balance
-    if tx_type == "DEPOSIT":
-        new_balance = current_balance + amount
-    elif tx_type == "WITHDRAWAL":
-        if amount > current_balance:
-            st.warning(f"Insufficient balance. Current: ${current_balance:,.2f}")
-            return False
-        new_balance = current_balance - amount
-    else:
-        st.warning(f"Invalid transaction type: {tx_type}")
-        return False
-    
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tx_id = f"{trader_name}_{now}_{tx_type[:3]}_{int(amount*100)}"
-    
-    row = [
-        now, trader_name, tx_type, amount,
-        new_balance, note, tx_id
-    ]
-    worksheet.append_row(row)
-    return True
-
-def get_cash_balance(trader_name):
-    try:
-        worksheet = init_cash_sheet()
-        if not worksheet:
-            return 0.0
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return 0.0
-        
-        if not records:
-            return 0.0
-        
-        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-        if not trader_transactions:
-            return 0.0
-        
-        last_tx = trader_transactions[-1]
-        return float(last_tx.get('running_balance', 0))
-    except Exception:
-        return 0.0
-
-def get_cash_transactions(trader_name, limit=10):
-    try:
-        worksheet = init_cash_sheet()
-        if not worksheet:
-            return []
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return []
-        
-        if not records:
-            return []
-        
-        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-        trader_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-        
-        return trader_transactions[:limit]
-    except Exception:
-        return []
-
-def get_cash_summary(trader_name):
-    try:
-        worksheet = init_cash_sheet()
-        if not worksheet:
-            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-        
-        if not records:
-            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-        
-        trader_transactions = [r for r in records if r.get('trader_name') == trader_name]
-        if not trader_transactions:
-            return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-        
-        total_deposits = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'DEPOSIT')
-        total_withdrawals = sum(float(r.get('amount', 0)) for r in trader_transactions if r.get('type') == 'WITHDRAWAL')
-        balance = float(trader_transactions[-1].get('running_balance', 0))
-        
-        return {
-            'balance': balance,
-            'total_deposits': total_deposits,
-            'total_withdrawals': total_withdrawals
-        }
-    except Exception:
-        return {'balance': 0, 'total_deposits': 0, 'total_withdrawals': 0}
-
-def calculate_portfolio_summary(positions_data):
-    total_investment = 0
-    total_unrealized_pnl = 0
-    total_realized_pnl = 0
-    
-    for pos in positions_data:
-        try:
-            if pos.get('status') != 'active':
-                total_realized_pnl += float(pos.get('realized_pnl', 0))
-                continue
-            
-            contracts = int(pos['contracts'])
-            entry_price = float(pos['entry_price'])
-            total_investment += contracts * entry_price * 100
-            
-            option_price, _, _, _ = get_current_option_price(pos['ticker'], pos['expiry'], float(pos['strike']))
-            if option_price:
-                unrealized = (option_price - entry_price) * contracts * 100
-                total_unrealized_pnl += unrealized
-            
-            realized = float(pos.get('realized_pnl', 0))
-            total_realized_pnl += realized
-        except Exception:
-            continue
-    
-    return total_investment, total_unrealized_pnl, total_realized_pnl
-
-def calculate_risk_score(pos, current_price, current_delta, days_left, current_iv, sentiment_adjustment=0):
-    entry_price = float(pos['entry_price'])
-    contracts = int(pos['contracts'])
-    position_value = contracts * entry_price * 100
-    size_score = min(position_value / 50000, 1.0)
-    
-    delta_score = 1 - min(max(current_delta, 0), 1)
-    time_score = 1 - min(days_left / 365, 1)
-    iv_score = min(current_iv * 2, 1) if current_iv else 0.5
-    
-    try:
-        current_stock = yf.Ticker(pos['ticker']).history(period="1d")['Close'].iloc[-1]
-        strike = float(pos['strike'])
-        moneyness = current_stock / strike if strike > 0 else 1
-        if moneyness >= 1:
-            moneyness_score = 0
-        else:
-            moneyness_score = 1 - moneyness
-    except:
-        moneyness_score = 0.5
-    
-    sentiment_score_normalized = max(-1, min(1, -sentiment_adjustment / 50))
-    sentiment_risk = (1 - sentiment_score_normalized) / 2
-    
-    risk_score = (size_score * 0.20 + delta_score * 0.20 + time_score * 0.15 + iv_score * 0.15 + moneyness_score * 0.10 + sentiment_risk * 0.20)
-    
-    return risk_score
-
-def get_current_option_price(ticker, expiry, strike):
-    try:
-        stock_obj = yf.Ticker(ticker)
-        opt_chain = stock_obj.option_chain(expiry)
-        calls = opt_chain.calls
-        option_row = calls[calls['strike'] == float(strike)]
-        if not option_row.empty:
-            row = option_row.iloc[0]
-            mid = (row['bid'] + row['ask']) / 2 if row['bid'] > 0 else row['lastPrice']
-            iv = row['impliedVolatility']
-            
-            # Get current stock price
-            stock_price = get_cached_current_price(ticker)
-            if stock_price is None:
-                stock_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
-            
-            # Calculate days to expiry
-            days_to_expiry = (pd.to_datetime(expiry).date() - datetime.now().date()).days
-            T_years = max(days_to_expiry, 1) / 365
-            
-            delta, gamma, theta, vega = calculate_greeks(stock_price, float(strike), T_years, 0.05, iv)
-                        
-            return mid, iv, gamma, theta
-        return None, None, None, None
-    except Exception as e:
-        st.caption(f"Error in get_current_option_price: {str(e)}")
-        return None, None, None, None
-
-# --- GROQ RETRY LOGIC ---
 def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
     for attempt in range(max_retries):
         try:
@@ -1802,8 +1275,58 @@ def get_ai_research(ticker):
         return fallback
 
 # ========================
-# CORE MATH & OPTIONS QUANT ENGINES
+# AI CHAT FUNCTIONS
 # ========================
+def get_ai_chat_response(ticker, user_question, chat_history, stock_metrics):
+    """
+    Get AI response for follow-up questions with full context
+    """
+    # Build context string from stock_metrics
+    context_str = ""
+    for key, value in stock_metrics.items():
+        if value is not None:
+            context_str += f"- {key}: {value}\n"
+    
+    # Format chat history
+    history_str = ""
+    for msg in chat_history[-5:]:  # Last 5 messages for context
+        if msg['role'] == 'user':
+            history_str += f"User: {msg['content']}\n"
+        else:
+            history_str += f"AI: {msg['content']}\n"
+    
+    prompt = f"""
+You are a professional options trader and quantitative analyst. You have access to the following data for {ticker}:
+
+STOCK METRICS:
+{context_str}
+
+CONVERSATION HISTORY:
+{history_str}
+
+USER QUESTION: {user_question}
+
+Provide a professional, concise, and actionable response. Focus on options trading implications. 
+If the user asks about anything not related to stocks, options, or trading, politely redirect them to trading-related topics.
+Keep your response to 2-4 paragraphs maximum.
+"""
+    
+    try:
+        groq_api_key = st.secrets.get("GROQ_API_KEY")
+        if not groq_api_key:
+            return "⚠️ Groq API key not configured. Please add it to your secrets."
+        
+        client = Groq(api_key=groq_api_key)
+        response = call_groq_with_retry(client, prompt)
+        
+        if response:
+            return response
+        else:
+            return "⚠️ AI response temporarily unavailable. Please try again later."
+    except Exception as e:
+        return f"⚠️ Error: {str(e)}"
+
+# --- CORE MATH & OPTIONS QUANT ENGINES ---
 def calculate_greeks(S, K, T, r, sigma, type="call"):
     if T <= 0 or sigma <= 0 or S <= 0: return 0.0, 0.0, 0.0, 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
@@ -1877,108 +1400,6 @@ def get_hybrid_recommendation(option_price, entry_price, target, stop_loss,
         return "🔵 STRONG HOLD", f"All metrics aligned"
     return "🔵 HOLD", f"Normal monitoring"
 
-# ========================
-# STEP B: AUTO-CLOSE EXPIRED POSITIONS
-# ========================
-def auto_close_expired_positions():
-    try:
-        worksheet = init_portfolio_sheet()
-        if not worksheet:
-            return 0
-        
-        try:
-            records = worksheet.get_all_records()
-        except Exception:
-            return 0
-        
-        if not records:
-            return 0
-        
-        today = datetime.now().date()
-        closed_count = 0
-        
-        for idx, record in enumerate(records):
-            if record.get("status") != "active":
-                continue
-            
-            try:
-                expiry_date = pd.to_datetime(record['expiry']).date()
-            except:
-                continue
-            
-            if expiry_date < today:
-                contracts = int(record['contracts'])
-                entry_price = float(record['entry_price'])
-                total_loss = -(contracts * entry_price * 100)
-                
-                existing_realized = float(record.get('realized_pnl', 0))
-                row_index = idx + 2
-                
-                worksheet.update_cell(row_index, 6, 0)
-                worksheet.update_cell(row_index, 13, "closed")
-                worksheet.update_cell(row_index, 19, existing_realized + total_loss)
-                
-                current_sold = int(record.get('sold_contracts', 0))
-                worksheet.update_cell(row_index, 18, current_sold + contracts)
-                
-                closed_count += 1
-        
-        return closed_count
-    except Exception:
-        return 0
-
-# ========================
-# AI CHAT FUNCTIONS
-# ========================
-def get_ai_chat_response(ticker, user_question, chat_history, stock_metrics):
-    """
-    Get AI response for follow-up questions with full context
-    """
-    # Build context string from stock_metrics
-    context_str = ""
-    for key, value in stock_metrics.items():
-        if value is not None:
-            context_str += f"- {key}: {value}\n"
-    
-    # Format chat history
-    history_str = ""
-    for msg in chat_history[-5:]:  # Last 5 messages for context
-        if msg['role'] == 'user':
-            history_str += f"User: {msg['content']}\n"
-        else:
-            history_str += f"AI: {msg['content']}\n"
-    
-    prompt = f"""
-You are a professional options trader and quantitative analyst. You have access to the following data for {ticker}:
-
-STOCK METRICS:
-{context_str}
-
-CONVERSATION HISTORY:
-{history_str}
-
-USER QUESTION: {user_question}
-
-Provide a professional, concise, and actionable response. Focus on options trading implications. 
-If the user asks about anything not related to stocks, options, or trading, politely redirect them to trading-related topics.
-Keep your response to 2-4 paragraphs maximum.
-"""
-    
-    try:
-        groq_api_key = st.secrets.get("GROQ_API_KEY")
-        if not groq_api_key:
-            return "⚠️ Groq API key not configured. Please add it to your secrets."
-        
-        client = Groq(api_key=groq_api_key)
-        response = call_groq_with_retry(client, prompt)
-        
-        if response:
-            return response
-        else:
-            return "⚠️ AI response temporarily unavailable. Please try again later."
-    except Exception as e:
-        return f"⚠️ Error: {str(e)}"
-
 # --- PAGE CONFIG & SESSION STATE ---
 state_keys = {
     'price': None, 'trend': None, 'sma20': 0, 'pct_change': 0, 
@@ -1987,7 +1408,6 @@ state_keys = {
     'global_conservative': None, 'global_aggressive': None, 'global_speculative': None,
     'ai_cache': None, 'profit_target_pct': 100, 'stop_loss_pct': 30,
     'current_sentiment': None, 'active_tab': 0, 'last_ai_refresh': None,
-    'last_expiry_check': None, 'selected_trader': "Mukul",
     'chat_history': [], 'initial_ai_message_sent': False
 }
 for key, default in state_keys.items():
@@ -2184,17 +1604,6 @@ if fetch_btn:
         st.error(f"Error fetching data: {str(e)}")
 
     st.rerun()
-
-# ========================
-# STEP B: AUTO-CLOSE EXPIRED POSITIONS ON APP LOAD
-# ========================
-# Check for expired positions (only once per session or when portfolio tab is accessed)
-if 'last_expiry_check' not in st.session_state or st.session_state.last_expiry_check != datetime.now().date():
-    with st.spinner("Checking for expired positions..."):
-        closed_count = auto_close_expired_positions()
-        if closed_count > 0:
-            st.success(f"✅ Auto-closed {closed_count} expired position(s)")
-        st.session_state.last_expiry_check = datetime.now().date()
 
 # ========================
 # MAIN CONTENT - REORDERED TABS (Step 6)
