@@ -1606,6 +1606,382 @@ if fetch_btn:
     st.rerun()
 
 # ========================
+# TRADING RECOMMENDATION ENGINE (GLOBAL)
+# ========================
+def get_trading_recommendation(data):
+    """
+    Contextual trading recommendation based on market regime and stock conditions.
+    Uses weighted factors with market regime adjustment.
+    
+    Returns: dict with recommendation details
+    """
+    
+    # --- Layer 1: Market Regime ---
+    vix = data.get('vix', 15)
+    
+    if vix < 12:
+        regime = "low_vol"
+        regime_modifier = 0.8  # Lower threshold for BUY
+        regime_desc = "Low Volatility - Options cheap, but low premiums"
+    elif vix < 20:
+        regime = "optimal"
+        regime_modifier = 1.0  # Normal threshold
+        regime_desc = "Optimal - Normal volatility regime"
+    elif vix < 25:
+        regime = "elevated"
+        regime_modifier = 1.3  # Higher threshold for BUY
+        regime_desc = "Elevated Volatility - Options expensive, higher gamma potential"
+    else:
+        regime = "high_vol"
+        regime_modifier = 1.6  # Much higher threshold
+        regime_desc = "High Volatility - Options overpriced, caution advised"
+    
+    # --- Layer 2: Stock-Specific Technicals ---
+    rsi = data.get('rsi', 50)
+    ema_status = data.get('ema_status', 'neutral')
+    bollinger_pos = data.get('bollinger_pos', 50)
+    iv_hv_spread = data.get('iv_hv_spread', 0)
+    beta = data.get('beta', 1.0)
+    pcr = data.get('pcr', 0.5)
+    market_verdict = data.get('market_verdict', '')
+    market_confidence = data.get('market_confidence', 0)
+    price = data.get('price', 100)
+    atr_pct = data.get('atr_pct', 3.0)  # Default 3% if not available
+    
+    # --- Layer 3: Factor Analysis with Weights ---
+    bullish_score = 0
+    bearish_score = 0
+    strong_bullish = 0
+    strong_bearish = 0
+    factor_details = []
+    
+    # 1. RSI (Weight: 0.25) - Most important
+    if rsi < 30:  # Oversold - Strong BUY signal
+        bullish_score += 2.5
+        strong_bullish += 1
+        factor_details.append("✅ RSI: OVERSOLD (Strong BUY)")
+    elif rsi < 35:  # Nearing oversold - BUY signal
+        bullish_score += 2.0
+        strong_bullish += 1
+        factor_details.append("✅ RSI: Nearing oversold (BUY)")
+    elif rsi < 40:  # Approaching oversold - LEANING BUY
+        bullish_score += 1.0
+        factor_details.append("🟡 RSI: Approaching oversold")
+    elif rsi < 45:  # Lower neutral - Mild bullish
+        bullish_score += 0.5
+        factor_details.append("🟡 RSI: Lower neutral")
+    elif rsi > 70:  # Overbought - Strong SELL
+        bearish_score += 2.5
+        strong_bearish += 1
+        factor_details.append("❌ RSI: OVERBOUGHT (Strong SELL)")
+    elif rsi > 65:  # Nearing overbought
+        bearish_score += 1.0
+        factor_details.append("❌ RSI: Nearing overbought")
+    elif rsi > 60:  # Upper neutral - Mild bearish
+        bearish_score += 0.5
+        factor_details.append("🟡 RSI: Upper neutral")
+    else:
+        factor_details.append("⚪ RSI: Neutral")
+    
+    # 2. IV/HV Spread (Weight: 0.20) - Options pricing
+    if iv_hv_spread < -10:  # Cheap options
+        bullish_score += 2.0
+        strong_bullish += 1
+        factor_details.append("✅ IV/HV: CHEAP options (Strong BUY)")
+    elif iv_hv_spread < -5:  # Slightly cheap
+        bullish_score += 1.0
+        factor_details.append("🟡 IV/HV: Slightly cheap")
+    elif iv_hv_spread > 10:  # Expensive options
+        bearish_score += 1.5
+        strong_bearish += 1
+        factor_details.append("❌ IV/HV: EXPENSIVE options (Avoid)")
+    elif iv_hv_spread > 5:  # Slightly expensive
+        bearish_score += 0.5
+        factor_details.append("🟡 IV/HV: Slightly expensive")
+    else:
+        factor_details.append("⚪ IV/HV: Fair value")
+    
+    # 3. EMA Status (Weight: 0.15)
+    if ema_status in ["Bullish Cross", "bullish"]:
+        bullish_score += 1.5
+        strong_bullish += 1
+        factor_details.append("✅ 8/20 EMA: Bullish (Uptrend)")
+    elif ema_status in ["Bearish Separation", "bearish"]:
+        bearish_score += 1.5
+        strong_bearish += 1
+        factor_details.append("❌ 8/20 EMA: Bearish (Downtrend)")
+    else:
+        factor_details.append("⚪ 8/20 EMA: Neutral")
+    
+    # 4. Market Verdict (Weight: 0.15)
+    if "BUY" in market_verdict and market_confidence >= 65:
+        bullish_score += 1.5
+        strong_bullish += 1
+        factor_details.append(f"✅ Market Verdict: BUY ({market_confidence:.0f}%)")
+    elif "WAIT" in market_verdict:
+        factor_details.append("🟡 Market Verdict: WAIT")
+    elif "DROP" in market_verdict:
+        bearish_score += 1.5
+        strong_bearish += 1
+        factor_details.append("❌ Market Verdict: DROP")
+    
+    # 5. Put/Call Ratio (Weight: 0.10)
+    if pcr < 0.6:  # Very bullish
+        bullish_score += 1.5
+        strong_bullish += 1
+        factor_details.append(f"✅ PCR: Very Bullish ({pcr:.2f})")
+    elif pcr < 0.8:  # Bullish
+        bullish_score += 0.5
+        factor_details.append(f"🟡 PCR: Bullish ({pcr:.2f})")
+    elif pcr > 1.2:  # Bearish
+        bearish_score += 1.0
+        strong_bearish += 1
+        factor_details.append(f"❌ PCR: Bearish ({pcr:.2f})")
+    else:
+        factor_details.append(f"⚪ PCR: Neutral ({pcr:.2f})")
+    
+    # 6. Bollinger Position (Weight: 0.10)
+    if bollinger_pos < 20:  # Near lower band - Support
+        bullish_score += 1.0
+        strong_bullish += 1
+        factor_details.append(f"✅ Bollinger: Near lower band ({bollinger_pos:.0f}%)")
+    elif bollinger_pos < 30:  # Lower half
+        bullish_score += 0.5
+        factor_details.append(f"🟡 Bollinger: Lower half ({bollinger_pos:.0f}%)")
+    elif bollinger_pos > 80:  # Near upper band - Resistance
+        bearish_score += 1.0
+        strong_bearish += 1
+        factor_details.append(f"❌ Bollinger: Near upper band ({bollinger_pos:.0f}%)")
+    elif bollinger_pos > 70:  # Upper half
+        bearish_score += 0.5
+        factor_details.append(f"🟡 Bollinger: Upper half ({bollinger_pos:.0f}%)")
+    else:
+        factor_details.append(f"⚪ Bollinger: Middle range ({bollinger_pos:.0f}%)")
+    
+    # 7. Beta (Risk Penalty - NOT a factor, but a modifier)
+    if beta > 1.5:
+        risk_penalty = 1.0
+        factor_details.append(f"🔴 Risk: HIGH BETA ({beta:.2f}) - Position size reduced")
+    elif beta > 1.2:
+        risk_penalty = 0.5
+        factor_details.append(f"🟡 Risk: Elevated BETA ({beta:.2f}) - Position size reduced")
+    else:
+        risk_penalty = 0
+        factor_details.append(f"🟢 Risk: Normal BETA ({beta:.2f})")
+    
+    # --- Calculate Net Score ---
+    net_score = bullish_score - bearish_score
+    
+    # Apply risk penalty
+    net_score = net_score - risk_penalty
+    
+    # --- Determine Thresholds Based on Regime ---
+    if regime == "optimal":
+        buy_threshold = 1.5
+        strong_buy_threshold = 3.5
+    elif regime == "low_vol":
+        buy_threshold = 1.0  # Easier to BUY
+        strong_buy_threshold = 3.0
+    elif regime == "elevated":
+        buy_threshold = 2.5  # Harder to BUY
+        strong_buy_threshold = 4.5
+    else:  # high_vol
+        buy_threshold = 3.5  # Very hard to BUY
+        strong_buy_threshold = 5.5
+    
+    # --- Entry Zone Calculation ---
+    if rsi < 30:
+        # Oversold - current price may be good entry
+        entry_zone_low = price * 0.97
+        entry_zone_high = price * 1.02
+    elif rsi < 40:
+        # Nearing oversold - wait for small pullback
+        entry_zone_low = price * 0.92
+        entry_zone_high = price * 0.97
+    elif ema_status in ["Bearish Separation", "bearish"]:
+        # Downtrend - wait for larger pullback
+        entry_zone_low = price * 0.88
+        entry_zone_high = price * 0.94
+    else:
+        entry_zone_low = price * 0.95
+        entry_zone_high = price * 0.98
+    
+    # --- Stop Loss (wider for high volatility) ---
+    if beta > 1.5:
+        stop_pct = 0.18  # 18% stop for high beta
+    elif beta > 1.2:
+        stop_pct = 0.12  # 12% stop for elevated beta
+    else:
+        stop_pct = 0.08  # 8% stop for normal beta
+    
+    stop_loss = price * (1 - stop_pct)
+    
+    # ============================================================
+    # DYNAMIC TARGET CALCULATION (NEW)
+    # ============================================================
+    
+    # 1. ATR-based target (higher volatility = higher target)
+    atr_target = atr_pct * 1.2  # 1.2x ATR for conservative target
+    
+    # 2. RSI-based target (oversold = higher bounce)
+    if rsi < 30:
+        rsi_adjustment = 2.0  # Strong bounce potential
+    elif rsi < 40:
+        rsi_adjustment = 1.5  # Moderate bounce
+    elif rsi < 50:
+        rsi_adjustment = 1.0  # Normal move
+    else:
+        rsi_adjustment = 0.8  # Limited upside from neutral/overbought
+    
+    # 3. IV/HV Spread adjustment
+    if iv_hv_spread < -10:
+        spread_boost = 1.5  # Cheap options - higher target
+    elif iv_hv_spread < -5:
+        spread_boost = 1.2  # Slightly cheap
+    elif iv_hv_spread > 10:
+        spread_boost = 0.8  # Expensive options - lower target
+    else:
+        spread_boost = 1.0  # Fair value
+    
+    # 4. Beta adjustment (high beta stocks move more)
+    if beta > 1.5:
+        beta_boost = 1.4  # Very volatile
+    elif beta > 1.2:
+        beta_boost = 1.2  # Moderately volatile
+    elif beta < 0.8:
+        beta_boost = 0.7  # Low volatility
+    else:
+        beta_boost = 1.0  # Market-like
+    
+    # 5. Market regime adjustment
+    if vix < 12:
+        regime_boost = 0.7  # Low vol = smaller moves
+    elif vix < 20:
+        regime_boost = 1.0  # Normal
+    elif vix < 25:
+        regime_boost = 1.2  # Elevated vol = bigger moves
+    else:
+        regime_boost = 0.9  # Very high vol = uncertainty
+    
+    # 6. EMA trend adjustment
+    if ema_status in ["Bullish Cross", "bullish"]:
+        trend_boost = 1.1  # Uptrend = higher target
+    elif ema_status in ["Bearish Separation", "bearish"]:
+        trend_boost = 0.9  # Downtrend = lower target
+    else:
+        trend_boost = 1.0  # Neutral
+    
+    # 7. Bollinger position adjustment
+    if bollinger_pos < 20:
+        bollinger_boost = 1.2  # Oversold bounce potential
+    elif bollinger_pos > 80:
+        bollinger_boost = 0.8  # Overbought resistance
+    else:
+        bollinger_boost = 1.0  # Middle range
+    
+    # --- Calculate Final Target Percentage ---
+    # Start with ATR-based target
+    base_target = atr_target
+    
+    # Apply all adjustments
+    target_pct = base_target * rsi_adjustment * spread_boost * beta_boost * regime_boost * trend_boost * bollinger_boost
+    
+    # Ensure target is within reasonable bounds (3% to 25%)
+    target_pct = max(3.0, min(25.0, target_pct))
+    
+    # Round to 1 decimal place
+    target_pct = round(target_pct, 1)
+    
+    target_price = price * (1 + target_pct / 100)
+    
+    # --- Position Size ---
+    if beta > 1.5:
+        position_size = "Quarter (25%)"
+        position_emoji = "🟡"
+    elif beta > 1.2:
+        position_size = "Half (50%)"
+        position_emoji = "🟢"
+    elif bearish_score >= 2.0:
+        position_size = "Half (50%)"
+        position_emoji = "🟢"
+    else:
+        position_size = "Full (100%)"
+        position_emoji = "🟢"
+    
+    # --- Determine Recommendation ---
+    # Check for STRONG BUY
+    if strong_bullish >= 2 and net_score >= strong_buy_threshold:
+        recommendation = "🟢 STRONG BUY"
+        rec_color = "green"
+        summary = f"Multiple strong bullish signals + {regime_desc} - EXCELLENT entry opportunity"
+        confidence = min(95, 75 + (strong_bullish * 8) + (net_score * 3))
+    
+    # Check for BUY
+    elif net_score >= buy_threshold and strong_bullish >= 1:
+        recommendation = "🟢 BUY"
+        rec_color = "green"
+        summary = f"Favorable conditions in {regime_desc} - consider entry"
+        confidence = min(90, 60 + (strong_bullish * 8) + (net_score * 2))
+    
+    # Check for LEANING BUY
+    elif net_score >= buy_threshold - 0.5:
+        recommendation = "🟡 LEANING BUY - WAIT"
+        rec_color = "orange"
+        summary = "Conditions are improving, wait for confirmation"
+        confidence = min(75, 50 + (net_score * 8))
+    
+    # Check for NEUTRAL
+    elif strong_bullish == 0 and strong_bearish == 0 and abs(net_score) < 1:
+        recommendation = "🟡 NEUTRAL - MONITOR"
+        rec_color = "orange"
+        summary = "Mixed signals - monitor for clearer direction"
+        confidence = 50
+    
+    # Check for AVOID
+    elif strong_bearish >= 2 and net_score < -1:
+        recommendation = "🔴 AVOID"
+        rec_color = "red"
+        summary = f"Strong bearish signals in {regime_desc} - stay away"
+        confidence = min(80, 50 + (strong_bearish * 10))
+    
+    # Everything else - WAIT
+    else:
+        recommendation = "🟡 WAIT FOR BETTER ENTRY"
+        rec_color = "orange"
+        summary = f"Not enough bullish confirmation in {regime_desc} - wait for better entry"
+        confidence = max(35, 45 + (net_score * 4))
+    
+    # --- Additional Context ---
+    if "BUY" in recommendation:
+        if beta > 1.5:
+            summary += " - Caution: High beta, use smaller position"
+        if iv_hv_spread < -10:
+            summary += " - Options are historically cheap"
+    elif "WAIT" in recommendation and iv_hv_spread < -10:
+        summary += " - Options are cheap but waiting for technical confirmation"
+    
+    return {
+        'recommendation': recommendation,
+        'rec_color': rec_color,
+        'summary': summary,
+        'confidence': min(round(confidence), 95),
+        'entry_zone_low': round(entry_zone_low, 2),
+        'entry_zone_high': round(entry_zone_high, 2),
+        'stop_loss': round(stop_loss, 2),
+        'target_price': round(target_price, 2),
+        'target_percent': target_pct,
+        'position_size': position_size,
+        'position_emoji': position_emoji,
+        'bullish_score': bullish_score,
+        'bearish_score': bearish_score,
+        'net_score': net_score,
+        'regime': regime_desc,
+        'factor_details': factor_details,
+        'strong_bullish': strong_bullish,
+        'strong_bearish': strong_bearish
+    }
+
+# ========================
 # MAIN CONTENT - REORDERED TABS (Step 6)
 # ========================
 t_dashboard, t_analysis, t_quant, t_tech, t_ai, t_edu = st.tabs([
@@ -1858,381 +2234,6 @@ with t_dashboard:
                 atm_target = atm_entry * (1 + profit_target_pct / 100)
                 atm_stop = atm_entry * (1 - stop_loss_pct / 100)
                 atm_delta = atm_row.get('delta', None)
-        
-        # --- ENHANCED RECOMMENDATION ENGINE (Contextual, Weighted, Multi-Factor) ---
-        def get_trading_recommendation(data):
-            """
-            Contextual trading recommendation based on market regime and stock conditions.
-            Uses weighted factors with market regime adjustment.
-            
-            Returns: dict with recommendation details
-            """
-            
-            # --- Layer 1: Market Regime ---
-            vix = data.get('vix', 15)
-            
-            if vix < 12:
-                regime = "low_vol"
-                regime_modifier = 0.8  # Lower threshold for BUY
-                regime_desc = "Low Volatility - Options cheap, but low premiums"
-            elif vix < 20:
-                regime = "optimal"
-                regime_modifier = 1.0  # Normal threshold
-                regime_desc = "Optimal - Normal volatility regime"
-            elif vix < 25:
-                regime = "elevated"
-                regime_modifier = 1.3  # Higher threshold for BUY
-                regime_desc = "Elevated Volatility - Options expensive, higher gamma potential"
-            else:
-                regime = "high_vol"
-                regime_modifier = 1.6  # Much higher threshold
-                regime_desc = "High Volatility - Options overpriced, caution advised"
-            
-            # --- Layer 2: Stock-Specific Technicals ---
-            rsi = data.get('rsi', 50)
-            ema_status = data.get('ema_status', 'neutral')
-            bollinger_pos = data.get('bollinger_pos', 50)
-            iv_hv_spread = data.get('iv_hv_spread', 0)
-            beta = data.get('beta', 1.0)
-            pcr = data.get('pcr', 0.5)
-            market_verdict = data.get('market_verdict', '')
-            market_confidence = data.get('market_confidence', 0)
-            price = data.get('price', 100)
-            atr_pct = data.get('atr_pct', 3.0)  # Default 3% if not available
-            
-            # --- Layer 3: Factor Analysis with Weights ---
-            bullish_score = 0
-            bearish_score = 0
-            strong_bullish = 0
-            strong_bearish = 0
-            factor_details = []
-            
-            # 1. RSI (Weight: 0.25) - Most important
-            if rsi < 30:  # Oversold - Strong BUY signal
-                bullish_score += 2.5
-                strong_bullish += 1
-                factor_details.append("✅ RSI: OVERSOLD (Strong BUY)")
-            elif rsi < 35:  # Nearing oversold - BUY signal
-                bullish_score += 2.0
-                strong_bullish += 1
-                factor_details.append("✅ RSI: Nearing oversold (BUY)")
-            elif rsi < 40:  # Approaching oversold - LEANING BUY
-                bullish_score += 1.0
-                factor_details.append("🟡 RSI: Approaching oversold")
-            elif rsi < 45:  # Lower neutral - Mild bullish
-                bullish_score += 0.5
-                factor_details.append("🟡 RSI: Lower neutral")
-            elif rsi > 70:  # Overbought - Strong SELL
-                bearish_score += 2.5
-                strong_bearish += 1
-                factor_details.append("❌ RSI: OVERBOUGHT (Strong SELL)")
-            elif rsi > 65:  # Nearing overbought
-                bearish_score += 1.0
-                factor_details.append("❌ RSI: Nearing overbought")
-            elif rsi > 60:  # Upper neutral - Mild bearish
-                bearish_score += 0.5
-                factor_details.append("🟡 RSI: Upper neutral")
-            else:
-                factor_details.append("⚪ RSI: Neutral")
-            
-            # 2. IV/HV Spread (Weight: 0.20) - Options pricing
-            if iv_hv_spread < -10:  # Cheap options
-                bullish_score += 2.0
-                strong_bullish += 1
-                factor_details.append("✅ IV/HV: CHEAP options (Strong BUY)")
-            elif iv_hv_spread < -5:  # Slightly cheap
-                bullish_score += 1.0
-                factor_details.append("🟡 IV/HV: Slightly cheap")
-            elif iv_hv_spread > 10:  # Expensive options
-                bearish_score += 1.5
-                strong_bearish += 1
-                factor_details.append("❌ IV/HV: EXPENSIVE options (Avoid)")
-            elif iv_hv_spread > 5:  # Slightly expensive
-                bearish_score += 0.5
-                factor_details.append("🟡 IV/HV: Slightly expensive")
-            else:
-                factor_details.append("⚪ IV/HV: Fair value")
-            
-            # 3. EMA Status (Weight: 0.15)
-            if ema_status in ["Bullish Cross", "bullish"]:
-                bullish_score += 1.5
-                strong_bullish += 1
-                factor_details.append("✅ 8/20 EMA: Bullish (Uptrend)")
-            elif ema_status in ["Bearish Separation", "bearish"]:
-                bearish_score += 1.5
-                strong_bearish += 1
-                factor_details.append("❌ 8/20 EMA: Bearish (Downtrend)")
-            else:
-                factor_details.append("⚪ 8/20 EMA: Neutral")
-            
-            # 4. Market Verdict (Weight: 0.15)
-            if "BUY" in market_verdict and market_confidence >= 65:
-                bullish_score += 1.5
-                strong_bullish += 1
-                factor_details.append(f"✅ Market Verdict: BUY ({market_confidence:.0f}%)")
-            elif "WAIT" in market_verdict:
-                factor_details.append("🟡 Market Verdict: WAIT")
-            elif "DROP" in market_verdict:
-                bearish_score += 1.5
-                strong_bearish += 1
-                factor_details.append("❌ Market Verdict: DROP")
-            
-            # 5. Put/Call Ratio (Weight: 0.10)
-            if pcr < 0.6:  # Very bullish
-                bullish_score += 1.5
-                strong_bullish += 1
-                factor_details.append(f"✅ PCR: Very Bullish ({pcr:.2f})")
-            elif pcr < 0.8:  # Bullish
-                bullish_score += 0.5
-                factor_details.append(f"🟡 PCR: Bullish ({pcr:.2f})")
-            elif pcr > 1.2:  # Bearish
-                bearish_score += 1.0
-                strong_bearish += 1
-                factor_details.append(f"❌ PCR: Bearish ({pcr:.2f})")
-            else:
-                factor_details.append(f"⚪ PCR: Neutral ({pcr:.2f})")
-            
-            # 6. Bollinger Position (Weight: 0.10)
-            if bollinger_pos < 20:  # Near lower band - Support
-                bullish_score += 1.0
-                strong_bullish += 1
-                factor_details.append(f"✅ Bollinger: Near lower band ({bollinger_pos:.0f}%)")
-            elif bollinger_pos < 30:  # Lower half
-                bullish_score += 0.5
-                factor_details.append(f"🟡 Bollinger: Lower half ({bollinger_pos:.0f}%)")
-            elif bollinger_pos > 80:  # Near upper band - Resistance
-                bearish_score += 1.0
-                strong_bearish += 1
-                factor_details.append(f"❌ Bollinger: Near upper band ({bollinger_pos:.0f}%)")
-            elif bollinger_pos > 70:  # Upper half
-                bearish_score += 0.5
-                factor_details.append(f"🟡 Bollinger: Upper half ({bollinger_pos:.0f}%)")
-            else:
-                factor_details.append(f"⚪ Bollinger: Middle range ({bollinger_pos:.0f}%)")
-            
-            # 7. Beta (Risk Penalty - NOT a factor, but a modifier)
-            if beta > 1.5:
-                risk_penalty = 1.0
-                factor_details.append(f"🔴 Risk: HIGH BETA ({beta:.2f}) - Position size reduced")
-            elif beta > 1.2:
-                risk_penalty = 0.5
-                factor_details.append(f"🟡 Risk: Elevated BETA ({beta:.2f}) - Position size reduced")
-            else:
-                risk_penalty = 0
-                factor_details.append(f"🟢 Risk: Normal BETA ({beta:.2f})")
-            
-            # --- Calculate Net Score ---
-            net_score = bullish_score - bearish_score
-            
-            # Apply risk penalty
-            net_score = net_score - risk_penalty
-            
-            # --- Determine Thresholds Based on Regime ---
-            if regime == "optimal":
-                buy_threshold = 1.5
-                strong_buy_threshold = 3.5
-            elif regime == "low_vol":
-                buy_threshold = 1.0  # Easier to BUY
-                strong_buy_threshold = 3.0
-            elif regime == "elevated":
-                buy_threshold = 2.5  # Harder to BUY
-                strong_buy_threshold = 4.5
-            else:  # high_vol
-                buy_threshold = 3.5  # Very hard to BUY
-                strong_buy_threshold = 5.5
-            
-            # --- Entry Zone Calculation ---
-            if rsi < 30:
-                # Oversold - current price may be good entry
-                entry_zone_low = price * 0.97
-                entry_zone_high = price * 1.02
-            elif rsi < 40:
-                # Nearing oversold - wait for small pullback
-                entry_zone_low = price * 0.92
-                entry_zone_high = price * 0.97
-            elif ema_status in ["Bearish Separation", "bearish"]:
-                # Downtrend - wait for larger pullback
-                entry_zone_low = price * 0.88
-                entry_zone_high = price * 0.94
-            else:
-                entry_zone_low = price * 0.95
-                entry_zone_high = price * 0.98
-            
-            # --- Stop Loss (wider for high volatility) ---
-            if beta > 1.5:
-                stop_pct = 0.18  # 18% stop for high beta
-            elif beta > 1.2:
-                stop_pct = 0.12  # 12% stop for elevated beta
-            else:
-                stop_pct = 0.08  # 8% stop for normal beta
-            
-            stop_loss = price * (1 - stop_pct)
-            
-            # ============================================================
-            # DYNAMIC TARGET CALCULATION (NEW)
-            # ============================================================
-            
-            # 1. ATR-based target (higher volatility = higher target)
-            atr_target = atr_pct * 1.2  # 1.2x ATR for conservative target
-            
-            # 2. RSI-based target (oversold = higher bounce)
-            if rsi < 30:
-                rsi_adjustment = 2.0  # Strong bounce potential
-            elif rsi < 40:
-                rsi_adjustment = 1.5  # Moderate bounce
-            elif rsi < 50:
-                rsi_adjustment = 1.0  # Normal move
-            else:
-                rsi_adjustment = 0.8  # Limited upside from neutral/overbought
-            
-            # 3. IV/HV Spread adjustment
-            if iv_hv_spread < -10:
-                spread_boost = 1.5  # Cheap options - higher target
-            elif iv_hv_spread < -5:
-                spread_boost = 1.2  # Slightly cheap
-            elif iv_hv_spread > 10:
-                spread_boost = 0.8  # Expensive options - lower target
-            else:
-                spread_boost = 1.0  # Fair value
-            
-            # 4. Beta adjustment (high beta stocks move more)
-            if beta > 1.5:
-                beta_boost = 1.4  # Very volatile
-            elif beta > 1.2:
-                beta_boost = 1.2  # Moderately volatile
-            elif beta < 0.8:
-                beta_boost = 0.7  # Low volatility
-            else:
-                beta_boost = 1.0  # Market-like
-            
-            # 5. Market regime adjustment
-            if vix < 12:
-                regime_boost = 0.7  # Low vol = smaller moves
-            elif vix < 20:
-                regime_boost = 1.0  # Normal
-            elif vix < 25:
-                regime_boost = 1.2  # Elevated vol = bigger moves
-            else:
-                regime_boost = 0.9  # Very high vol = uncertainty
-            
-            # 6. EMA trend adjustment
-            if ema_status in ["Bullish Cross", "bullish"]:
-                trend_boost = 1.1  # Uptrend = higher target
-            elif ema_status in ["Bearish Separation", "bearish"]:
-                trend_boost = 0.9  # Downtrend = lower target
-            else:
-                trend_boost = 1.0  # Neutral
-            
-            # 7. Bollinger position adjustment
-            if bollinger_pos < 20:
-                bollinger_boost = 1.2  # Oversold bounce potential
-            elif bollinger_pos > 80:
-                bollinger_boost = 0.8  # Overbought resistance
-            else:
-                bollinger_boost = 1.0  # Middle range
-            
-            # --- Calculate Final Target Percentage ---
-            # Start with ATR-based target
-            base_target = atr_target
-            
-            # Apply all adjustments
-            target_pct = base_target * rsi_adjustment * spread_boost * beta_boost * regime_boost * trend_boost * bollinger_boost
-            
-            # Ensure target is within reasonable bounds (3% to 25%)
-            target_pct = max(3.0, min(25.0, target_pct))
-            
-            # Round to 1 decimal place
-            target_pct = round(target_pct, 1)
-            
-            target_price = price * (1 + target_pct / 100)
-            
-            # --- Position Size ---
-            if beta > 1.5:
-                position_size = "Quarter (25%)"
-                position_emoji = "🟡"
-            elif beta > 1.2:
-                position_size = "Half (50%)"
-                position_emoji = "🟢"
-            elif bearish_score >= 2.0:
-                position_size = "Half (50%)"
-                position_emoji = "🟢"
-            else:
-                position_size = "Full (100%)"
-                position_emoji = "🟢"
-            
-            # --- Determine Recommendation ---
-            # Check for STRONG BUY
-            if strong_bullish >= 2 and net_score >= strong_buy_threshold:
-                recommendation = "🟢 STRONG BUY"
-                rec_color = "green"
-                summary = f"Multiple strong bullish signals + {regime_desc} - EXCELLENT entry opportunity"
-                confidence = min(95, 75 + (strong_bullish * 8) + (net_score * 3))
-            
-            # Check for BUY
-            elif net_score >= buy_threshold and strong_bullish >= 1:
-                recommendation = "🟢 BUY"
-                rec_color = "green"
-                summary = f"Favorable conditions in {regime_desc} - consider entry"
-                confidence = min(90, 60 + (strong_bullish * 8) + (net_score * 2))
-            
-            # Check for LEANING BUY
-            elif net_score >= buy_threshold - 0.5:
-                recommendation = "🟡 LEANING BUY - WAIT"
-                rec_color = "orange"
-                summary = "Conditions are improving, wait for confirmation"
-                confidence = min(75, 50 + (net_score * 8))
-            
-            # Check for NEUTRAL
-            elif strong_bullish == 0 and strong_bearish == 0 and abs(net_score) < 1:
-                recommendation = "🟡 NEUTRAL - MONITOR"
-                rec_color = "orange"
-                summary = "Mixed signals - monitor for clearer direction"
-                confidence = 50
-            
-            # Check for AVOID
-            elif strong_bearish >= 2 and net_score < -1:
-                recommendation = "🔴 AVOID"
-                rec_color = "red"
-                summary = f"Strong bearish signals in {regime_desc} - stay away"
-                confidence = min(80, 50 + (strong_bearish * 10))
-            
-            # Everything else - WAIT
-            else:
-                recommendation = "🟡 WAIT FOR BETTER ENTRY"
-                rec_color = "orange"
-                summary = f"Not enough bullish confirmation in {regime_desc} - wait for better entry"
-                confidence = max(35, 45 + (net_score * 4))
-            
-            # --- Additional Context ---
-            if "BUY" in recommendation:
-                if beta > 1.5:
-                    summary += " - Caution: High beta, use smaller position"
-                if iv_hv_spread < -10:
-                    summary += " - Options are historically cheap"
-            elif "WAIT" in recommendation and iv_hv_spread < -10:
-                summary += " - Options are cheap but waiting for technical confirmation"
-            
-            return {
-                'recommendation': recommendation,
-                'rec_color': rec_color,
-                'summary': summary,
-                'confidence': min(round(confidence), 95),
-                'entry_zone_low': round(entry_zone_low, 2),
-                'entry_zone_high': round(entry_zone_high, 2),
-                'stop_loss': round(stop_loss, 2),
-                'target_price': round(target_price, 2),
-                'target_percent': target_pct,
-                'position_size': position_size,
-                'position_emoji': position_emoji,
-                'bullish_score': bullish_score,
-                'bearish_score': bearish_score,
-                'net_score': net_score,
-                'regime': regime_desc,
-                'factor_details': factor_details,
-                'strong_bullish': strong_bullish,
-                'strong_bearish': strong_bearish
-            }
-
         
         # --- Prepare data for recommendation ---
         decision_data = {
@@ -3140,16 +3141,222 @@ with t_ai:
         if 'initial_ai_message_sent' not in st.session_state:
             st.session_state.initial_ai_message_sent = False
         
+        # Function to generate the comprehensive AI insight (same as Dashboard)
+        def generate_comprehensive_ai_insight(ticker):
+            """Generate the comprehensive AI insight with macro context"""
+            if not st.session_state.price or not st.session_state.expiries:
+                return None
+            
+            S = st.session_state.price
+            hist_data = st.session_state.hist_data
+            
+            # Get all the metrics
+            vix = get_vix()
+            atr_val, atr_pct = calculate_atr(hist_data)
+            rsi_val = calculate_rsi(hist_data)
+            hv_val = calculate_hv(hist_data)
+            
+            current_expiry = st.session_state.last_selected_expiry if st.session_state.last_selected_expiry else (st.session_state.expiries[0] if st.session_state.expiries else None)
+            
+            if current_expiry:
+                calls_df, _ = get_cached_option_chain(ticker, current_expiry)
+                if calls_df is not None and not calls_df.empty:
+                    atm_idx = (calls_df['strike'] - S).abs().argsort()[:1]
+                    current_iv = calls_df.iloc[atm_idx]['impliedVolatility'].iloc[0] if not calls_df.empty else 0.35
+                else:
+                    current_iv = 0.35
+            else:
+                current_iv = 0.35
+            
+            iv_hv_spread, _ = calculate_iv_hv_spread(current_iv, hv_val)
+            
+            earnings_date = get_earnings_date(ticker)
+            if earnings_date:
+                days_to_earnings = (earnings_date - datetime.now().date()).days
+            else:
+                days_to_earnings = None
+            
+            beta, _ = calculate_beta(ticker)
+            
+            try:
+                if current_expiry:
+                    calls_df, puts_df = get_cached_option_chain(ticker, current_expiry)
+                    if calls_df is not None and not calls_df.empty:
+                        skew, _ = calculate_skew(calls_df, puts_df if puts_df is not None else pd.DataFrame(), S)
+                    else:
+                        skew = 0
+                else:
+                    skew = 0
+            except:
+                skew = 0
+            
+            curr, prev = get_technicals(hist_data)
+            ema_status = "Bullish Cross" if curr['ema8'] > curr['ema20'] else "Bearish Separation"
+            term_structure = "Neutral"
+            
+            pc_ratio = 0.5
+            try:
+                pc_ratio, pc_sentiment, pc_interpretation, call_vol, put_vol = calculate_put_call_ratio(ticker, current_expiry)
+                if pc_ratio is None:
+                    pc_ratio = 0.5
+            except:
+                pc_ratio = 0.5
+            
+            sentiment_data = getattr(st.session_state, 'current_sentiment', None)
+            sentiment_score = sentiment_data.get('sentiment_score', 0) if sentiment_data else 0
+            
+            weighted_verdict, weighted_confidence = calculate_weighted_verdict(
+                vix, rsi_val, iv_hv_spread, sentiment_score, skew, beta
+            )
+            
+            # Get macro data
+            macro_data = get_macro_data()
+            sector, industry = get_sector_for_ticker(ticker)
+            
+            # Get the trading recommendation
+            decision_data = {
+                'price': S,
+                'rsi': rsi_val,
+                'iv_hv_spread': iv_hv_spread,
+                'pcr': pc_ratio if pc_ratio else 0.5,
+                'beta': beta,
+                'ema_status': ema_status,
+                'bollinger_pos': ((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100 if 'lower' in curr and 'upper' in curr else 50,
+                'term_structure': term_structure if term_structure else "Neutral",
+                'market_verdict': weighted_verdict,
+                'market_confidence': weighted_confidence,
+                'vix': vix,
+                'atr_pct': atr_pct
+            }
+            
+            decision = get_trading_recommendation(decision_data)
+            
+            # Build macro context
+            macro_context = f"""
+MACRO CONTEXT:
+- VIX: {macro_data.get('vix', 15):.1f} ({macro_data.get('regime', 'Neutral')})
+- SPY 5-Day Change: {macro_data.get('spy_change_5d', 0):+.1f}%
+- Market Regime: {macro_data.get('regime_description', 'Normal')}
+- Earnings: {f"Next earnings in {days_to_earnings} days" if earnings_date and days_to_earnings > 0 else "No upcoming earnings" if not earnings_date else f"Earnings {abs(days_to_earnings)} days ago"}
+"""
+            
+            # Build sector performance context
+            sector_performance = ""
+            if macro_data.get('sector_data'):
+                sector_performance = "SECTOR PERFORMANCE (5-Day):\n"
+                for sector_name, data in macro_data['sector_data'].items():
+                    sector_performance += f"- {sector_name}: {data['change_5d']:+.1f}%\n"
+            
+            # Get stock-specific news
+            stock_news_context = ""
+            stock_news = get_stock_news(ticker, limit=5)
+            if stock_news:
+                stock_news_context = f"\n{ticker}-SPECIFIC NEWS (Last 7 Days):\n"
+                for i, article in enumerate(stock_news):
+                    headline = article.get('headline', 'No title')
+                    summary = article.get('summary', '')[:150]
+                    source = article.get('source', 'Unknown')
+                    date = article.get('datetime', '')
+                    stock_news_context += f"{i+1}. {headline}\n"
+                    stock_news_context += f"   Summary: {summary}\n"
+                    stock_news_context += f"   Source: {source} | Date: {date}\n\n"
+            else:
+                stock_news_context = f"\nNo recent news found for {ticker} in the last 7 days.\n"
+            
+            # Build the comprehensive AI prompt (same as Dashboard)
+            ai_prompt = f"""
+You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {ticker}, provide a concise trading insight.
+
+TICKER: {ticker}
+SECTOR: {sector} | INDUSTRY: {industry}
+
+TECHNICAL METRICS:
+- Price: ${S:.2f}
+- RSI (14d): {rsi_val:.1f}
+- 8/20 EMA Status: {ema_status}
+- Bollinger Position: {((S - curr['lower']) / (curr['upper'] - curr['lower'])) * 100:.0f}% of band
+- Trend: {st.session_state.trend}
+
+VOLATILITY METRICS:
+- Implied Volatility (IV): {current_iv * 100:.1f}%
+- Historical Volatility (HV): {hv_val:.1f}%
+- IV/HV Spread: {iv_hv_spread:.1f}%
+- Beta (vs SPY): {beta:.2f}
+- Term Structure: {term_structure if term_structure else "Neutral"}
+
+SENTIMENT METRICS:
+- Put/Call Ratio: {pc_ratio if pc_ratio else 0.5:.2f}
+- Market Verdict: {weighted_verdict} ({weighted_confidence:.0f}% confidence)
+
+{macro_context}
+{sector_performance}
+{stock_news_context}
+
+MY RECOMMENDATION: {decision['recommendation']}
+- Confidence: {decision['confidence']}%
+- Entry Zone: ${decision['entry_zone_low']:.2f} - ${decision['entry_zone_high']:.2f}
+- Stop Loss: ${decision['stop_loss']:.2f}
+- Target: ${decision['target_price']:.2f}
+- Position Size: {decision['position_size']}
+
+Provide a 3-4 sentence insight that:
+1. Acknowledges the macro environment and how it affects this trade
+2. Mentions the sector context and any relevant sector trends
+3. INCORPORATES ANY RECENT STOCK-SPECIFIC NEWS OR CATALYSTS (this is critical!)
+4. Explains the key reason for the recommendation
+5. Gives a clear, actionable takeaway
+
+Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, and this specific stock.
+"""
+            
+            try:
+                groq_api_key = st.secrets.get("GROQ_API_KEY")
+                if groq_api_key:
+                    client = Groq(api_key=groq_api_key)
+                    response = call_groq_with_retry(client, ai_prompt)
+                    if response:
+                        return response
+            except:
+                pass
+            
+            return None
+        
         # Function to send initial AI message
         def send_initial_ai_message():
             if st.session_state.current_ticker and not st.session_state.initial_ai_message_sent:
-                # Get the AI research brief
-                if not st.session_state.ai_brief:
-                    with st.spinner("Generating AI insights..."):
-                        st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+                # Generate the comprehensive AI insight
+                ai_insight = generate_comprehensive_ai_insight(st.session_state.current_ticker)
                 
-                # Add initial AI message to chat
-                initial_message = f"📊 **AI Analysis for {st.session_state.current_ticker}**\n\n{st.session_state.ai_brief}\n\n---\n*Feel free to ask follow-up questions about this analysis or any other aspects of {st.session_state.current_ticker}.*"
+                if ai_insight:
+                    # Also fetch the news sentiment for additional context
+                    if not st.session_state.ai_brief:
+                        with st.spinner("Gathering news sentiment..."):
+                            st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+                    
+                    # Create the initial message with both insights
+                    initial_message = f"""🤖 **AI Trading Recommendation for {st.session_state.current_ticker}**
+
+{ai_insight}
+
+---
+💡 **Sentiment Summary:**
+{st.session_state.ai_brief}
+
+---
+*💬 Feel free to ask follow-up questions about this analysis, the options structure, or any other aspects of {st.session_state.current_ticker}.*"""
+                else:
+                    # Fallback to just the news sentiment if AI insight fails
+                    if not st.session_state.ai_brief:
+                        with st.spinner("Generating AI insights..."):
+                            st.session_state.ai_brief = get_ai_research(st.session_state.current_ticker)
+                    
+                    initial_message = f"""🤖 **AI Analysis for {st.session_state.current_ticker}**
+
+{st.session_state.ai_brief}
+
+---
+*💬 Feel free to ask follow-up questions about this analysis or any other aspects of {st.session_state.current_ticker}.*"""
+                
                 st.session_state.chat_history.append({"role": "assistant", "content": initial_message})
                 st.session_state.initial_ai_message_sent = True
         
