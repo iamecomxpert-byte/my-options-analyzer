@@ -3464,6 +3464,7 @@ with t_dashboard:
             market_verdict = data.get('market_verdict', '')
             market_confidence = data.get('market_confidence', 0)
             price = data.get('price', 100)
+            atr_pct = data.get('atr_pct', 3.0)  # Default 3% if not available
             
             # --- Layer 3: Factor Analysis with Weights ---
             bullish_score = 0
@@ -3633,17 +3634,83 @@ with t_dashboard:
             
             stop_loss = price * (1 - stop_pct)
             
-            # --- Target (based on volatility and IV/HV spread) ---
-            if iv_hv_spread < -10:
-                # Cheap options - higher target potential
-                target_pct = 0.15
-            elif rsi < 30:
-                # Oversold - bounce potential
-                target_pct = 0.12
-            else:
-                target_pct = 0.08
+            # ============================================================
+            # DYNAMIC TARGET CALCULATION (NEW)
+            # ============================================================
             
-            target_price = price * (1 + target_pct)
+            # 1. ATR-based target (higher volatility = higher target)
+            atr_target = atr_pct * 1.2  # 1.2x ATR for conservative target
+            
+            # 2. RSI-based target (oversold = higher bounce)
+            if rsi < 30:
+                rsi_adjustment = 2.0  # Strong bounce potential
+            elif rsi < 40:
+                rsi_adjustment = 1.5  # Moderate bounce
+            elif rsi < 50:
+                rsi_adjustment = 1.0  # Normal move
+            else:
+                rsi_adjustment = 0.8  # Limited upside from neutral/overbought
+            
+            # 3. IV/HV Spread adjustment
+            if iv_hv_spread < -10:
+                spread_boost = 1.5  # Cheap options - higher target
+            elif iv_hv_spread < -5:
+                spread_boost = 1.2  # Slightly cheap
+            elif iv_hv_spread > 10:
+                spread_boost = 0.8  # Expensive options - lower target
+            else:
+                spread_boost = 1.0  # Fair value
+            
+            # 4. Beta adjustment (high beta stocks move more)
+            if beta > 1.5:
+                beta_boost = 1.4  # Very volatile
+            elif beta > 1.2:
+                beta_boost = 1.2  # Moderately volatile
+            elif beta < 0.8:
+                beta_boost = 0.7  # Low volatility
+            else:
+                beta_boost = 1.0  # Market-like
+            
+            # 5. Market regime adjustment
+            if vix < 12:
+                regime_boost = 0.7  # Low vol = smaller moves
+            elif vix < 20:
+                regime_boost = 1.0  # Normal
+            elif vix < 25:
+                regime_boost = 1.2  # Elevated vol = bigger moves
+            else:
+                regime_boost = 0.9  # Very high vol = uncertainty
+            
+            # 6. EMA trend adjustment
+            if ema_status in ["Bullish Cross", "bullish"]:
+                trend_boost = 1.1  # Uptrend = higher target
+            elif ema_status in ["Bearish Separation", "bearish"]:
+                trend_boost = 0.9  # Downtrend = lower target
+            else:
+                trend_boost = 1.0  # Neutral
+            
+            # 7. Bollinger position adjustment
+            if bollinger_pos < 20:
+                bollinger_boost = 1.2  # Oversold bounce potential
+            elif bollinger_pos > 80:
+                bollinger_boost = 0.8  # Overbought resistance
+            else:
+                bollinger_boost = 1.0  # Middle range
+            
+            # --- Calculate Final Target Percentage ---
+            # Start with ATR-based target
+            base_target = atr_target
+            
+            # Apply all adjustments
+            target_pct = base_target * rsi_adjustment * spread_boost * beta_boost * regime_boost * trend_boost * bollinger_boost
+            
+            # Ensure target is within reasonable bounds (3% to 25%)
+            target_pct = max(3.0, min(25.0, target_pct))
+            
+            # Round to 1 decimal place
+            target_pct = round(target_pct, 1)
+            
+            target_price = price * (1 + target_pct / 100)
             
             # --- Position Size ---
             if beta > 1.5:
@@ -3720,6 +3787,7 @@ with t_dashboard:
                 'entry_zone_high': round(entry_zone_high, 2),
                 'stop_loss': round(stop_loss, 2),
                 'target_price': round(target_price, 2),
+                'target_percent': target_pct,
                 'position_size': position_size,
                 'position_emoji': position_emoji,
                 'bullish_score': bullish_score,
@@ -3730,6 +3798,7 @@ with t_dashboard:
                 'strong_bullish': strong_bullish,
                 'strong_bearish': strong_bearish
             }
+
         
         # --- Prepare data for recommendation ---
         decision_data = {
@@ -3747,7 +3816,8 @@ with t_dashboard:
             'atm_entry': atm_entry,
             'atm_target': atm_target,
             'atm_stop': atm_stop,
-            'vix': vix
+            'vix': vix,
+            'atr_pct': atr_pct  # <-- ADD THIS LINE
         }
         
         # --- Generate recommendation ---
@@ -3785,7 +3855,9 @@ with t_dashboard:
         with col_q3:
             st.metric("🛑 Stop Loss", f"${decision['stop_loss']:.2f}")
         with col_q4:
-            st.metric("🎯 Target", f"${decision['target_price']:.2f}", delta=f"{((decision['target_price']/S)-1)*100:.1f}%")
+            st.metric("🎯 Target", f"${decision['target_price']:.2f}", 
+                     delta=f"{decision['target_percent']:.1f}% upside")
+
         
         # --- Expandable: Why This Recommendation ---
         with st.expander("📊 Why This Recommendation (Click to expand)", expanded=False):
