@@ -2735,26 +2735,26 @@ MACRO CONTEXT:
                     stock_news_context = f"\nNo recent news found for {st.session_state.current_ticker} in the last 7 days.\n"
                 
                 # ============================================================
-# NEW: Build events context for AI
-# ============================================================
-events_context = ""
-economic_events = get_economic_events(days_ahead=10)
-if economic_events:
-    events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
-    for event in economic_events[:5]:  # Top 5 events
-        days_until = event.get('days_until', 0)
-        impact = event.get('impact', 'Low')
-        event_name = event.get('event', 'Unknown')
-        events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
+                # NEW: Build events context for AI
+                # ============================================================
+                events_context = ""
+                economic_events = get_economic_events(days_ahead=10)
+                if economic_events:
+                    events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
+                    for event in economic_events[:5]:  # Top 5 events
+                        days_until = event.get('days_until', 0)
+                        impact = event.get('impact', 'Low')
+                        event_name = event.get('event', 'Unknown')
+                        events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
+                
+                # Add earnings event
+                earnings_event = get_upcoming_earnings(st.session_state.current_ticker, days_ahead=10)
+                if earnings_event:
+                    days_until = earnings_event.get('days_until', 0)
+                    events_context += f"- EARNINGS for {st.session_state.current_ticker}: {days_until} days away (HIGH impact)\n"
 
-# Add earnings event
-earnings_event = get_upcoming_earnings(st.session_state.current_ticker, days_ahead=10)
-if earnings_event:
-    days_until = earnings_event.get('days_until', 0)
-    events_context += f"- EARNINGS for {st.session_state.current_ticker}: {days_until} days away (HIGH impact)\n"
-
-# Build the enhanced AI prompt
-ai_prompt = f"""
+                # Build the enhanced AI prompt
+                ai_prompt = f"""
 You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {st.session_state.current_ticker}, provide a concise trading insight.
 
 TICKER: {st.session_state.current_ticker}
@@ -3609,26 +3609,26 @@ MACRO CONTEXT:
                 stock_news_context = f"\nNo recent news found for {ticker} in the last 7 days.\n"
             
             # ============================================================
-# NEW: Build events context for AI (in AI Research tab)
-# ============================================================
-events_context = ""
-economic_events = get_economic_events(days_ahead=10)
-if economic_events:
-    events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
-    for event in economic_events[:5]:  # Top 5 events
-        days_until = event.get('days_until', 0)
-        impact = event.get('impact', 'Low')
-        event_name = event.get('event', 'Unknown')
-        events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
-
-# Add earnings event
-earnings_event = get_upcoming_earnings(ticker, days_ahead=10)
-if earnings_event:
-    days_until = earnings_event.get('days_until', 0)
-    events_context += f"- EARNINGS for {ticker}: {days_until} days away (HIGH impact)\n"
-
-# Build the comprehensive AI prompt
-ai_prompt = f"""
+            # NEW: Build events context for AI (in AI Research tab)
+            # ============================================================
+            events_context = ""
+            economic_events = get_economic_events(days_ahead=10)
+            if economic_events:
+                events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
+                for event in economic_events[:5]:  # Top 5 events
+                    days_until = event.get('days_until', 0)
+                    impact = event.get('impact', 'Low')
+                    event_name = event.get('event', 'Unknown')
+                    events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
+            
+            # Add earnings event
+            earnings_event = get_upcoming_earnings(ticker, days_ahead=10)
+            if earnings_event:
+                days_until = earnings_event.get('days_until', 0)
+                events_context += f"- EARNINGS for {ticker}: {days_until} days away (HIGH impact)\n"
+            
+            # Build the comprehensive AI prompt
+            ai_prompt = f"""
 You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {ticker}, provide a concise trading insight.
 
 TICKER: {ticker}
