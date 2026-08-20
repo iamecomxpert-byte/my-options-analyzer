@@ -424,109 +424,116 @@ def get_market_events_today():
     except:
         return []
 
-def get_economic_events(days_ahead=10):
+def get_economic_events(days_ahead=15):
     """
-    Fetch upcoming economic events using Finnhub Economic Calendar API
-    
-    Args:
-        days_ahead: Number of days to look ahead (default 10)
-    
-    Returns:
-        List of economic events with details
+    Fetch upcoming economic events from Finnhub news headlines.
+    (Economic calendar endpoint is not available on free tier)
     """
     try:
         api_key = st.secrets.get("FINNHUB_API_KEY")
         if not api_key:
             return []
         
-        # Finnhub economic calendar endpoint
-        url = "https://finnhub.io/api/v1/economic_calendar"
-        
-        # Get date range
-        start_date = datetime.now().date()
-        end_date = start_date + timedelta(days=days_ahead)
-        
+        # Get general news
+        url = "https://finnhub.io/api/v1/news"
         params = {
-            'from': start_date.strftime('%Y-%m-%d'),
-            'to': end_date.strftime('%Y-%m-%d'),
+            'category': 'general',
             'token': api_key
         }
-        
         response = requests.get(url, params=params)
         
         if response.status_code != 200:
-            # Fallback: Try to get from news if economic calendar fails
-            return get_market_events_today()
-        
-        events = response.json()
-        
-        if not events:
             return []
         
-        # Format events
-        formatted_events = []
+        articles = response.json()
+        if not articles:
+            return []
         
-        # Priority events that matter most for markets
-        high_impact_events = [
-            'FOMC', 'Fed', 'CPI', 'PPI', 'Nonfarm Payrolls', 
-            'Unemployment', 'GDP', 'Retail Sales', 'ISM',
-            'PMI', 'Consumer Confidence', 'Durable Goods',
-            'Housing', 'Inflation', 'Interest Rate', 'Powell'
+        # Keywords that indicate economic events
+        economic_keywords = [
+            'Fed', 'FOMC', 'CPI', 'PPI', 'Nonfarm', 'Payrolls', 
+            'Unemployment', 'GDP', 'Retail Sales', 'ISM', 'PMI',
+            'Consumer Confidence', 'Inflation', 'Interest Rate',
+            'Powell', 'Housing', 'Durable Goods', 'Trade',
+            'Jobs', 'Claim', 'Manufacturing', 'Services', 'Consumer Price'
         ]
         
-        for event in events:
-            # Skip events with low impact if we have many
-            # Finnhub may not provide impact level directly, so we infer
-            event_name = event.get('event', '') or event.get('name', '')
+        # High impact keywords
+        high_impact_keywords = [
+            'FOMC', 'Fed', 'CPI', 'Nonfarm Payrolls', 'Interest Rate',
+            'Powell', 'GDP', 'Inflation'
+        ]
+        
+        events = []
+        seen_events = set()
+        
+        for article in articles[:30]:
+            headline = article.get('headline', '')
+            summary = article.get('summary', '')
+            text = (headline + ' ' + summary).lower()
             
-            if not event_name:
+            # Check if this is an economic event
+            is_economic = False
+            for keyword in economic_keywords:
+                if keyword.lower() in text:
+                    is_economic = True
+                    break
+            
+            if not is_economic:
                 continue
             
-            # Determine impact level based on keywords
+            # Parse date
+            timestamp = article.get('datetime', 0)
+            if timestamp == 0:
+                continue
+                
+            event_date = datetime.fromtimestamp(timestamp).date()
+            days_until = (event_date - datetime.now().date()).days
+            
+            # Only consider events in the future (0-10 days)
+            if days_until < 0 or days_until > days_ahead:
+                continue
+            
+            # Determine impact
             impact = "Medium"
-            for high_impact in high_impact_events:
-                if high_impact.lower() in event_name.lower():
+            for hk in high_impact_keywords:
+                if hk.lower() in text:
                     impact = "High"
                     break
             
-            # Parse date
-            event_date_str = event.get('date', '')
-            try:
-                if event_date_str:
-                    event_date = pd.to_datetime(event_date_str).date()
-                else:
-                    continue
-            except:
+            # Clean up headline
+            clean_headline = headline[:80]
+            if len(headline) > 80:
+                clean_headline += "..."
+            
+            # Create unique key to avoid duplicates
+            event_key = f"{clean_headline}_{event_date}"
+            if event_key in seen_events:
                 continue
+            seen_events.add(event_key)
             
-            # Calculate days until event
-            days_until = (event_date - datetime.now().date()).days
-            
-            formatted_events.append({
+            events.append({
                 'date': event_date,
                 'days_until': days_until,
-                'event': event_name,
+                'event': clean_headline,
                 'impact': impact,
-                'country': event.get('country', 'US'),
-                'actual': event.get('actual', ''),
-                'forecast': event.get('forecast', ''),
-                'previous': event.get('previous', ''),
-                'unit': event.get('unit', ''),
-                'period': event.get('period', '')
+                'country': article.get('source', 'US'),
+                'actual': '',
+                'forecast': '',
+                'previous': '',
+                'unit': '',
+                'source': article.get('source', 'Unknown'),
+                'url': article.get('url', '#')
             })
         
         # Sort by date
-        formatted_events.sort(key=lambda x: x['date'])
+        events.sort(key=lambda x: x['date'])
         
-        return formatted_events
+        return events[:10]
     
     except Exception as e:
-        # Fallback: Try to get from news
-        try:
-            return get_market_events_today()
-        except:
-            return []
-
+        return []
+        
 def get_upcoming_earnings(ticker, days_ahead=10):
     """
     Get upcoming earnings date for a specific ticker
