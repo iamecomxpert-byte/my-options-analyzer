@@ -331,7 +331,7 @@ def estimate_iv_percentile(current_iv, hv):
 # ========================
 
 def get_macro_data():
-    """Fetch macro-level data for AI context"""
+    """Fetch macro-level data for AI context including upcoming events"""
     macro_data = {}
     
     # VIX
@@ -354,7 +354,7 @@ def get_macro_data():
         macro_data['spy_change_5d'] = 0
         macro_data['spy_price'] = 0
     
-    # Sector ETFs (relevant to quantum computing/semiconductor stocks)
+    # Sector ETFs
     sector_etfs = {
         'Semiconductors': 'SMH',
         'Technology': 'XLK',
@@ -376,6 +376,22 @@ def get_macro_data():
             pass
     
     macro_data['sector_data'] = sector_data
+    
+    # ============================================================
+    # NEW: Fetch upcoming economic events (next 10 days)
+    # ============================================================
+    macro_data['economic_events'] = get_economic_events(days_ahead=10)
+    
+    # ============================================================
+    # NEW: Get VIX term structure (future VIX levels)
+    # ============================================================
+    try:
+        vix_futures = yf.Ticker("VX")
+        vix_futures_hist = vix_futures.history(period="5d")
+        if not vix_futures_hist.empty:
+            macro_data['vix_close'] = vix_futures_hist['Close'].iloc[-1]
+    except:
+        macro_data['vix_close'] = macro_data['vix']
     
     return macro_data
 
@@ -407,6 +423,137 @@ def get_market_events_today():
         return []
     except:
         return []
+
+def get_economic_events(days_ahead=10):
+    """
+    Fetch upcoming economic events using Finnhub Economic Calendar API
+    
+    Args:
+        days_ahead: Number of days to look ahead (default 10)
+    
+    Returns:
+        List of economic events with details
+    """
+    try:
+        api_key = st.secrets.get("FINNHUB_API_KEY")
+        if not api_key:
+            return []
+        
+        # Finnhub economic calendar endpoint
+        url = "https://finnhub.io/api/v1/economic_calendar"
+        
+        # Get date range
+        start_date = datetime.now().date()
+        end_date = start_date + timedelta(days=days_ahead)
+        
+        params = {
+            'from': start_date.strftime('%Y-%m-%d'),
+            'to': end_date.strftime('%Y-%m-%d'),
+            'token': api_key
+        }
+        
+        response = requests.get(url, params=params)
+        
+        if response.status_code != 200:
+            # Fallback: Try to get from news if economic calendar fails
+            return get_market_events_today()
+        
+        events = response.json()
+        
+        if not events:
+            return []
+        
+        # Format events
+        formatted_events = []
+        
+        # Priority events that matter most for markets
+        high_impact_events = [
+            'FOMC', 'Fed', 'CPI', 'PPI', 'Nonfarm Payrolls', 
+            'Unemployment', 'GDP', 'Retail Sales', 'ISM',
+            'PMI', 'Consumer Confidence', 'Durable Goods',
+            'Housing', 'Inflation', 'Interest Rate', 'Powell'
+        ]
+        
+        for event in events:
+            # Skip events with low impact if we have many
+            # Finnhub may not provide impact level directly, so we infer
+            event_name = event.get('event', '') or event.get('name', '')
+            
+            if not event_name:
+                continue
+            
+            # Determine impact level based on keywords
+            impact = "Medium"
+            for high_impact in high_impact_events:
+                if high_impact.lower() in event_name.lower():
+                    impact = "High"
+                    break
+            
+            # Parse date
+            event_date_str = event.get('date', '')
+            try:
+                if event_date_str:
+                    event_date = pd.to_datetime(event_date_str).date()
+                else:
+                    continue
+            except:
+                continue
+            
+            # Calculate days until event
+            days_until = (event_date - datetime.now().date()).days
+            
+            formatted_events.append({
+                'date': event_date,
+                'days_until': days_until,
+                'event': event_name,
+                'impact': impact,
+                'country': event.get('country', 'US'),
+                'actual': event.get('actual', ''),
+                'forecast': event.get('forecast', ''),
+                'previous': event.get('previous', ''),
+                'unit': event.get('unit', ''),
+                'period': event.get('period', '')
+            })
+        
+        # Sort by date
+        formatted_events.sort(key=lambda x: x['date'])
+        
+        return formatted_events
+    
+    except Exception as e:
+        # Fallback: Try to get from news
+        try:
+            return get_market_events_today()
+        except:
+            return []
+
+def get_upcoming_earnings(ticker, days_ahead=10):
+    """
+    Get upcoming earnings date for a specific ticker
+    (Already exists as get_earnings_date, but we add more context)
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        calendar = stock.calendar
+        if not calendar.empty and 'Earnings Date' in calendar.index:
+            earnings_date = calendar.loc['Earnings Date']
+            if isinstance(earnings_date, pd.Series):
+                earnings_date = earnings_date.iloc[0]
+            if isinstance(earnings_date, (datetime, pd.Timestamp)):
+                earnings_date = earnings_date.date()
+                days_until = (earnings_date - datetime.now().date()).days
+                
+                if 0 <= days_until <= days_ahead:
+                    return {
+                        'date': earnings_date,
+                        'days_until': days_until,
+                        'event': 'Earnings Release',
+                        'impact': 'High',
+                        'ticker': ticker
+                    }
+        return None
+    except:
+        return None
 
 def get_stock_news(ticker, limit=5):
     """
@@ -1626,7 +1773,7 @@ if fetch_btn:
 def get_trading_recommendation(data):
     """
     Contextual trading recommendation based on market regime and stock conditions.
-    Uses weighted factors with market regime adjustment.
+    Includes impact from upcoming economic events.
     
     Returns: dict with recommendation details
     """
@@ -1636,19 +1783,19 @@ def get_trading_recommendation(data):
     
     if vix < 12:
         regime = "low_vol"
-        regime_modifier = 0.8  # Lower threshold for BUY
+        regime_modifier = 0.8
         regime_desc = "Low Volatility - Options cheap, but low premiums"
     elif vix < 20:
         regime = "optimal"
-        regime_modifier = 1.0  # Normal threshold
+        regime_modifier = 1.0
         regime_desc = "Optimal - Normal volatility regime"
     elif vix < 25:
         regime = "elevated"
-        regime_modifier = 1.3  # Higher threshold for BUY
+        regime_modifier = 1.3
         regime_desc = "Elevated Volatility - Options expensive, higher gamma potential"
     else:
         regime = "high_vol"
-        regime_modifier = 1.6  # Much higher threshold
+        regime_modifier = 1.6
         regime_desc = "High Volatility - Options overpriced, caution advised"
     
     # --- Layer 2: Stock-Specific Technicals ---
@@ -1661,56 +1808,101 @@ def get_trading_recommendation(data):
     market_verdict = data.get('market_verdict', '')
     market_confidence = data.get('market_confidence', 0)
     price = data.get('price', 100)
-    atr_pct = data.get('atr_pct', 3.0)  # Default 3% if not available
+    atr_pct = data.get('atr_pct', 3.0)
     
-    # --- Layer 3: Factor Analysis with Weights ---
+    # ============================================================
+    # NEW: Event Impact Analysis
+    # ============================================================
+    events = data.get('economic_events', [])
+    event_impact_score = 0
+    high_impact_events_coming = 0
+    event_details = []
+    
+    if events:
+        for event in events:
+            days_until = event.get('days_until', 99)
+            impact = event.get('impact', 'Low')
+            
+            # Only consider events in the next 10 days
+            if 0 <= days_until <= 10:
+                if impact == 'High':
+                    high_impact_events_coming += 1
+                    event_impact_score += 1.5
+                    event_details.append(f"🔴 {event['event']} in {days_until}d (HIGH IMPACT)")
+                elif impact == 'Medium':
+                    event_impact_score += 0.5
+                    event_details.append(f"🟡 {event['event']} in {days_until}d")
+                
+                # Closer events have more impact
+                if days_until <= 3:
+                    event_impact_score += 0.5
+    else:
+        event_details.append("No major economic events in the next 10 days")
+    
+    # ============================================================
+    # NEW: Earnings Impact for this specific ticker
+    # ============================================================
+    upcoming_earnings = data.get('upcoming_earnings', None)
+    earnings_event_details = ""
+    
+    if upcoming_earnings:
+        days_until_earnings = upcoming_earnings.get('days_until', 99)
+        if 0 <= days_until_earnings <= 10:
+            event_impact_score += 2.0  # Earnings are always high impact
+            high_impact_events_coming += 1
+            earnings_event_details = f"🔴 EARNINGS in {days_until_earnings} days - HIGH VOLATILITY EXPECTED"
+            event_details.append(earnings_event_details)
+    
+    # ============================================================
+    # Layer 3: Factor Analysis with Weights (existing logic)
+    # ============================================================
     bullish_score = 0
     bearish_score = 0
     strong_bullish = 0
     strong_bearish = 0
     factor_details = []
     
-    # 1. RSI (Weight: 0.25) - Most important
-    if rsi < 30:  # Oversold - Strong BUY signal
+    # 1. RSI (Weight: 0.25)
+    if rsi < 30:
         bullish_score += 2.5
         strong_bullish += 1
         factor_details.append("✅ RSI: OVERSOLD (Strong BUY)")
-    elif rsi < 35:  # Nearing oversold - BUY signal
+    elif rsi < 35:
         bullish_score += 2.0
         strong_bullish += 1
         factor_details.append("✅ RSI: Nearing oversold (BUY)")
-    elif rsi < 40:  # Approaching oversold - LEANING BUY
+    elif rsi < 40:
         bullish_score += 1.0
         factor_details.append("🟡 RSI: Approaching oversold")
-    elif rsi < 45:  # Lower neutral - Mild bullish
+    elif rsi < 45:
         bullish_score += 0.5
         factor_details.append("🟡 RSI: Lower neutral")
-    elif rsi > 70:  # Overbought - Strong SELL
+    elif rsi > 70:
         bearish_score += 2.5
         strong_bearish += 1
         factor_details.append("❌ RSI: OVERBOUGHT (Strong SELL)")
-    elif rsi > 65:  # Nearing overbought
+    elif rsi > 65:
         bearish_score += 1.0
         factor_details.append("❌ RSI: Nearing overbought")
-    elif rsi > 60:  # Upper neutral - Mild bearish
+    elif rsi > 60:
         bearish_score += 0.5
         factor_details.append("🟡 RSI: Upper neutral")
     else:
         factor_details.append("⚪ RSI: Neutral")
     
-    # 2. IV/HV Spread (Weight: 0.20) - Options pricing
-    if iv_hv_spread < -10:  # Cheap options
+    # 2. IV/HV Spread (Weight: 0.20)
+    if iv_hv_spread < -10:
         bullish_score += 2.0
         strong_bullish += 1
         factor_details.append("✅ IV/HV: CHEAP options (Strong BUY)")
-    elif iv_hv_spread < -5:  # Slightly cheap
+    elif iv_hv_spread < -5:
         bullish_score += 1.0
         factor_details.append("🟡 IV/HV: Slightly cheap")
-    elif iv_hv_spread > 10:  # Expensive options
+    elif iv_hv_spread > 10:
         bearish_score += 1.5
         strong_bearish += 1
         factor_details.append("❌ IV/HV: EXPENSIVE options (Avoid)")
-    elif iv_hv_spread > 5:  # Slightly expensive
+    elif iv_hv_spread > 5:
         bearish_score += 0.5
         factor_details.append("🟡 IV/HV: Slightly expensive")
     else:
@@ -1741,14 +1933,14 @@ def get_trading_recommendation(data):
         factor_details.append("❌ Market Verdict: DROP")
     
     # 5. Put/Call Ratio (Weight: 0.10)
-    if pcr < 0.6:  # Very bullish
+    if pcr < 0.6:
         bullish_score += 1.5
         strong_bullish += 1
         factor_details.append(f"✅ PCR: Very Bullish ({pcr:.2f})")
-    elif pcr < 0.8:  # Bullish
+    elif pcr < 0.8:
         bullish_score += 0.5
         factor_details.append(f"🟡 PCR: Bullish ({pcr:.2f})")
-    elif pcr > 1.2:  # Bearish
+    elif pcr > 1.2:
         bearish_score += 1.0
         strong_bearish += 1
         factor_details.append(f"❌ PCR: Bearish ({pcr:.2f})")
@@ -1756,24 +1948,24 @@ def get_trading_recommendation(data):
         factor_details.append(f"⚪ PCR: Neutral ({pcr:.2f})")
     
     # 6. Bollinger Position (Weight: 0.10)
-    if bollinger_pos < 20:  # Near lower band - Support
+    if bollinger_pos < 20:
         bullish_score += 1.0
         strong_bullish += 1
         factor_details.append(f"✅ Bollinger: Near lower band ({bollinger_pos:.0f}%)")
-    elif bollinger_pos < 30:  # Lower half
+    elif bollinger_pos < 30:
         bullish_score += 0.5
         factor_details.append(f"🟡 Bollinger: Lower half ({bollinger_pos:.0f}%)")
-    elif bollinger_pos > 80:  # Near upper band - Resistance
+    elif bollinger_pos > 80:
         bearish_score += 1.0
         strong_bearish += 1
         factor_details.append(f"❌ Bollinger: Near upper band ({bollinger_pos:.0f}%)")
-    elif bollinger_pos > 70:  # Upper half
+    elif bollinger_pos > 70:
         bearish_score += 0.5
         factor_details.append(f"🟡 Bollinger: Upper half ({bollinger_pos:.0f}%)")
     else:
         factor_details.append(f"⚪ Bollinger: Middle range ({bollinger_pos:.0f}%)")
     
-    # 7. Beta (Risk Penalty - NOT a factor, but a modifier)
+    # 7. Beta (Risk Penalty)
     if beta > 1.5:
         risk_penalty = 1.0
         factor_details.append(f"🔴 Risk: HIGH BETA ({beta:.2f}) - Position size reduced")
@@ -1784,132 +1976,139 @@ def get_trading_recommendation(data):
         risk_penalty = 0
         factor_details.append(f"🟢 Risk: Normal BETA ({beta:.2f})")
     
-    # --- Calculate Net Score ---
-    net_score = bullish_score - bearish_score
+    # ============================================================
+    # NEW: Apply Event Impact Penalty/Adjustment
+    # ============================================================
+    # High impact events in next 3 days = reduce bullish score
+    # Earnings in next 7 days = reduce bullish score significantly
+    # No events = slight bullish bias (normal conditions)
     
-    # Apply risk penalty
-    net_score = net_score - risk_penalty
+    if high_impact_events_coming >= 2:
+        # Multiple high impact events - caution
+        event_penalty = 1.5
+        factor_details.append(f"⚠️ {high_impact_events_coming} high-impact events coming - REDUCE SIZE")
+    elif high_impact_events_coming >= 1:
+        event_penalty = 0.8
+        factor_details.append(f"⚠️ High-impact event coming - CAUTION")
+    else:
+        event_penalty = 0
     
-    # --- Determine Thresholds Based on Regime ---
-    if regime == "optimal":
-        buy_threshold = 1.5
-        strong_buy_threshold = 3.5
-    elif regime == "low_vol":
-        buy_threshold = 1.0  # Easier to BUY
-        strong_buy_threshold = 3.0
-    elif regime == "elevated":
-        buy_threshold = 2.5  # Harder to BUY
-        strong_buy_threshold = 4.5
-    else:  # high_vol
-        buy_threshold = 3.5  # Very hard to BUY
-        strong_buy_threshold = 5.5
+    # Check if earnings are near
+    if upcoming_earnings and upcoming_earnings.get('days_until', 99) <= 7:
+        event_penalty += 1.0
+        factor_details.append(f"⚠️ EARNINGS in {upcoming_earnings['days_until']} days - IV PREMIUM EXPENSIVE")
     
-    # --- Entry Zone Calculation ---
+    # Apply event penalty to net score
+    net_score = bullish_score - bearish_score - event_penalty
+    
+    # ============================================================
+    # Entry Zone Calculation (with event adjustment)
+    # ============================================================
     if rsi < 30:
-        # Oversold - current price may be good entry
         entry_zone_low = price * 0.97
         entry_zone_high = price * 1.02
     elif rsi < 40:
-        # Nearing oversold - wait for small pullback
         entry_zone_low = price * 0.92
         entry_zone_high = price * 0.97
     elif ema_status in ["Bearish Separation", "bearish"]:
-        # Downtrend - wait for larger pullback
         entry_zone_low = price * 0.88
         entry_zone_high = price * 0.94
     else:
         entry_zone_low = price * 0.95
         entry_zone_high = price * 0.98
     
-    # --- Stop Loss (wider for high volatility) ---
+    # Event adjustment: If high impact events coming, wait for bigger pullback
+    if high_impact_events_coming >= 1:
+        entry_zone_low = entry_zone_low * 0.97  # 3% lower entry
+        entry_zone_high = entry_zone_high * 0.98
+    
+    # ============================================================
+    # Stop Loss (wider for events)
+    # ============================================================
     if beta > 1.5:
-        stop_pct = 0.18  # 18% stop for high beta
+        stop_pct = 0.18
     elif beta > 1.2:
-        stop_pct = 0.12  # 12% stop for elevated beta
+        stop_pct = 0.12
     else:
-        stop_pct = 0.08  # 8% stop for normal beta
+        stop_pct = 0.08
+    
+    # Wider stop for upcoming events
+    if high_impact_events_coming >= 1:
+        stop_pct += 0.03
     
     stop_loss = price * (1 - stop_pct)
     
     # ============================================================
-    # DYNAMIC TARGET CALCULATION (NEW)
+    # Dynamic Target Calculation
     # ============================================================
+    atr_target = atr_pct * 1.2
     
-    # 1. ATR-based target (higher volatility = higher target)
-    atr_target = atr_pct * 1.2  # 1.2x ATR for conservative target
-    
-    # 2. RSI-based target (oversold = higher bounce)
     if rsi < 30:
-        rsi_adjustment = 2.0  # Strong bounce potential
+        rsi_adjustment = 2.0
     elif rsi < 40:
-        rsi_adjustment = 1.5  # Moderate bounce
+        rsi_adjustment = 1.5
     elif rsi < 50:
-        rsi_adjustment = 1.0  # Normal move
+        rsi_adjustment = 1.0
     else:
-        rsi_adjustment = 0.8  # Limited upside from neutral/overbought
+        rsi_adjustment = 0.8
     
-    # 3. IV/HV Spread adjustment
     if iv_hv_spread < -10:
-        spread_boost = 1.5  # Cheap options - higher target
+        spread_boost = 1.5
     elif iv_hv_spread < -5:
-        spread_boost = 1.2  # Slightly cheap
+        spread_boost = 1.2
     elif iv_hv_spread > 10:
-        spread_boost = 0.8  # Expensive options - lower target
+        spread_boost = 0.8
     else:
-        spread_boost = 1.0  # Fair value
+        spread_boost = 1.0
     
-    # 4. Beta adjustment (high beta stocks move more)
     if beta > 1.5:
-        beta_boost = 1.4  # Very volatile
+        beta_boost = 1.4
     elif beta > 1.2:
-        beta_boost = 1.2  # Moderately volatile
+        beta_boost = 1.2
     elif beta < 0.8:
-        beta_boost = 0.7  # Low volatility
+        beta_boost = 0.7
     else:
-        beta_boost = 1.0  # Market-like
+        beta_boost = 1.0
     
-    # 5. Market regime adjustment
     if vix < 12:
-        regime_boost = 0.7  # Low vol = smaller moves
+        regime_boost = 0.7
     elif vix < 20:
-        regime_boost = 1.0  # Normal
+        regime_boost = 1.0
     elif vix < 25:
-        regime_boost = 1.2  # Elevated vol = bigger moves
+        regime_boost = 1.2
     else:
-        regime_boost = 0.9  # Very high vol = uncertainty
+        regime_boost = 0.9
     
-    # 6. EMA trend adjustment
     if ema_status in ["Bullish Cross", "bullish"]:
-        trend_boost = 1.1  # Uptrend = higher target
+        trend_boost = 1.1
     elif ema_status in ["Bearish Separation", "bearish"]:
-        trend_boost = 0.9  # Downtrend = lower target
+        trend_boost = 0.9
     else:
-        trend_boost = 1.0  # Neutral
+        trend_boost = 1.0
     
-    # 7. Bollinger position adjustment
     if bollinger_pos < 20:
-        bollinger_boost = 1.2  # Oversold bounce potential
+        bollinger_boost = 1.2
     elif bollinger_pos > 80:
-        bollinger_boost = 0.8  # Overbought resistance
+        bollinger_boost = 0.8
     else:
-        bollinger_boost = 1.0  # Middle range
+        bollinger_boost = 1.0
     
-    # --- Calculate Final Target Percentage ---
-    # Start with ATR-based target
-    base_target = atr_target
+    # Event target adjustment: If high impact events, target can be bigger
+    if high_impact_events_coming >= 1:
+        event_target_boost = 1.15  # 15% bigger moves expected
+    else:
+        event_target_boost = 1.0
     
-    # Apply all adjustments
-    target_pct = base_target * rsi_adjustment * spread_boost * beta_boost * regime_boost * trend_boost * bollinger_boost
+    target_pct = (atr_target * rsi_adjustment * spread_boost * beta_boost * 
+                  regime_boost * trend_boost * bollinger_boost * event_target_boost)
     
-    # Ensure target is within reasonable bounds (3% to 25%)
     target_pct = max(3.0, min(25.0, target_pct))
-    
-    # Round to 1 decimal place
     target_pct = round(target_pct, 1)
-    
     target_price = price * (1 + target_pct / 100)
     
-    # --- Position Size ---
+    # ============================================================
+    # Position Size (with event adjustment)
+    # ============================================================
     if beta > 1.5:
         position_size = "Quarter (25%)"
         position_emoji = "🟡"
@@ -1923,57 +2122,73 @@ def get_trading_recommendation(data):
         position_size = "Full (100%)"
         position_emoji = "🟢"
     
-    # --- Determine Recommendation ---
-    # Check for STRONG BUY
+    # Reduce position size for high impact events
+    if high_impact_events_coming >= 2:
+        position_size = "Quarter (25%) - HIGH EVENT RISK"
+        position_emoji = "🔴"
+    elif high_impact_events_coming >= 1:
+        if "Full" in position_size:
+            position_size = "Half (50%) - EVENT CAUTION"
+            position_emoji = "🟡"
+    
+    # ============================================================
+    # Determine Recommendation (with event consideration)
+    # ============================================================
     if strong_bullish >= 2 and net_score >= strong_buy_threshold:
         recommendation = "🟢 STRONG BUY"
         rec_color = "green"
-        summary = f"Multiple strong bullish signals + {regime_desc} - EXCELLENT entry opportunity"
+        summary = f"Multiple strong bullish signals + {regime_desc}"
+        if high_impact_events_coming >= 1:
+            summary += " - CAUTION: Events ahead, consider scaling in"
+        else:
+            summary += " - EXCELLENT entry opportunity"
         confidence = min(95, 75 + (strong_bullish * 8) + (net_score * 3))
     
-    # Check for BUY
     elif net_score >= buy_threshold and strong_bullish >= 1:
         recommendation = "🟢 BUY"
         rec_color = "green"
-        summary = f"Favorable conditions in {regime_desc} - consider entry"
+        summary = f"Favorable conditions in {regime_desc}"
+        if high_impact_events_coming >= 1:
+            summary += " - EVENTS AHEAD: Use limit orders, not market"
+        else:
+            summary += " - consider entry"
         confidence = min(90, 60 + (strong_bullish * 8) + (net_score * 2))
     
-    # Check for LEANING BUY
     elif net_score >= buy_threshold - 0.5:
         recommendation = "🟡 LEANING BUY - WAIT"
         rec_color = "orange"
         summary = "Conditions are improving, wait for confirmation"
+        if high_impact_events_coming >= 1:
+            summary += " - Events make timing critical"
         confidence = min(75, 50 + (net_score * 8))
     
-    # Check for NEUTRAL
     elif strong_bullish == 0 and strong_bearish == 0 and abs(net_score) < 1:
         recommendation = "🟡 NEUTRAL - MONITOR"
         rec_color = "orange"
         summary = "Mixed signals - monitor for clearer direction"
         confidence = 50
     
-    # Check for AVOID
     elif strong_bearish >= 2 and net_score < -1:
         recommendation = "🔴 AVOID"
         rec_color = "red"
         summary = f"Strong bearish signals in {regime_desc} - stay away"
+        if high_impact_events_coming >= 1:
+            summary += " - Events could amplify downside"
         confidence = min(80, 50 + (strong_bearish * 10))
     
-    # Everything else - WAIT
     else:
         recommendation = "🟡 WAIT FOR BETTER ENTRY"
         rec_color = "orange"
-        summary = f"Not enough bullish confirmation in {regime_desc} - wait for better entry"
+        summary = f"Not enough bullish confirmation in {regime_desc}"
+        if high_impact_events_coming >= 1:
+            summary += " - Wait for event uncertainty to clear"
+        else:
+            summary += " - wait for better entry"
         confidence = max(35, 45 + (net_score * 4))
     
-    # --- Additional Context ---
-    if "BUY" in recommendation:
-        if beta > 1.5:
-            summary += " - Caution: High beta, use smaller position"
-        if iv_hv_spread < -10:
-            summary += " - Options are historically cheap"
-    elif "WAIT" in recommendation and iv_hv_spread < -10:
-        summary += " - Options are cheap but waiting for technical confirmation"
+    # Additional context for events
+    if high_impact_events_coming >= 1 and "BUY" in recommendation:
+        summary += " - Scale in gradually (50% now, 50% after events)"
     
     return {
         'recommendation': recommendation,
@@ -1993,7 +2208,12 @@ def get_trading_recommendation(data):
         'regime': regime_desc,
         'factor_details': factor_details,
         'strong_bullish': strong_bullish,
-        'strong_bearish': strong_bearish
+        'strong_bearish': strong_bearish,
+        # NEW: Event-related data
+        'event_details': event_details,
+        'high_impact_events': high_impact_events_coming,
+        'earnings_event': earnings_event_details,
+        'event_impact_score': event_impact_score
     }
 
 # ========================
@@ -2192,6 +2412,96 @@ with t_dashboard:
             st.metric("WEIGHTED (PhD Model)", weighted_verdict, delta=f"{weighted_confidence:.0f}% confidence")
             st.caption(f"Factors: VIX 20%, RSI 15%, IV/HV 20%, Sentiment 20%, Skew 15%, Beta 10%")
 
+
+
+        # ============================================================
+        # NEW: UPCOMING EVENTS SECTION (in Dashboard tab)
+        # ============================================================
+        st.divider()
+        st.subheader("📅 Upcoming Events (Next 10 Days)")
+        
+        # Get economic events
+        economic_events = get_economic_events(days_ahead=10)
+        upcoming_earnings = get_upcoming_earnings(st.session_state.current_ticker, days_ahead=10)
+        
+        if economic_events or upcoming_earnings:
+            
+            # Display economic events
+            if economic_events:
+                for event in economic_events[:8]:  # Show top 8 events
+                    days_until = event.get('days_until', 0)
+                    impact = event.get('impact', 'Low')
+                    event_name = event.get('event', 'Unknown Event')
+                    
+                    # Color code by impact
+                    if impact == 'High':
+                        icon = "🔴"
+                        bg_color = "rgba(220, 53, 69, 0.1)"
+                    elif impact == 'Medium':
+                        icon = "🟡"
+                        bg_color = "rgba(255, 193, 7, 0.1)"
+                    else:
+                        icon = "🟢"
+                        bg_color = "rgba(40, 167, 69, 0.1)"
+                    
+                    # Build display
+                    if days_until == 0:
+                        days_text = "TODAY"
+                        urgency = "🔥 "
+                    elif days_until <= 3:
+                        days_text = f"{days_until} days"
+                        urgency = "⚠️ "
+                    else:
+                        days_text = f"{days_until} days"
+                        urgency = ""
+                    
+                    # Additional info
+                    actual = event.get('actual', '')
+                    forecast = event.get('forecast', '')
+                    previous = event.get('previous', '')
+                    unit = event.get('unit', '')
+                    
+                    details = []
+                    if actual:
+                        details.append(f"Actual: {actual} {unit}".strip())
+                    if forecast:
+                        details.append(f"Forecast: {forecast} {unit}".strip())
+                    if previous:
+                        details.append(f"Previous: {previous} {unit}".strip())
+                    
+                    detail_str = " | ".join(details) if details else ""
+                    
+                    st.markdown(f"""
+                    <div style="border-left: 4px solid {'#dc3545' if impact == 'High' else '#ffc107' if impact == 'Medium' else '#28a745'}; 
+                                padding: 8px 12px; margin: 4px 0; background-color: {bg_color}; border-radius: 4px;">
+                        <span style="font-weight:600;">{icon} {event_name}</span>
+                        <span style="margin-left: 15px; font-size:0.85rem; opacity:0.8;">📅 {days_text}</span>
+                        <span style="margin-left: 10px; font-size:0.8rem; background: rgba(0,0,0,0.1); padding: 0 8px; border-radius: 10px;">{impact} Impact</span>
+                        {f"<span style='margin-left: 10px; font-size:0.8rem; opacity:0.7;'>{detail_str}</span>" if detail_str else ""}
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Display earnings event
+            if upcoming_earnings:
+                days_until = upcoming_earnings.get('days_until', 0)
+                if days_until == 0:
+                    days_text = "TODAY"
+                else:
+                    days_text = f"{days_until} days"
+                
+                st.warning(f"🔴 **EARNINGS** for {st.session_state.current_ticker} in {days_text} - HIGH VOLATILITY EXPECTED")
+                st.caption("⚠️ Consider IV premium and potential post-earnings moves")
+            
+            # Event impact summary
+            if economic_events:
+                high_impact_count = sum(1 for e in economic_events if e.get('impact') == 'High' and 0 <= e.get('days_until', 99) <= 10)
+                if high_impact_count >= 2:
+                    st.warning(f"⚠️ {high_impact_count} high-impact events in the next 10 days - Consider reducing position size")
+                elif high_impact_count >= 1:
+                    st.info(f"📊 {high_impact_count} high-impact event in the next 10 days - Adjust entry timing")
+        else:
+            st.info("No major economic events detected in the next 10 days")
+            
         # ============================================================
         # HISTORICAL PRICE CHART (MOVED FROM TECHNICAL TAB)
         # ============================================================
@@ -2424,8 +2734,27 @@ MACRO CONTEXT:
                 else:
                     stock_news_context = f"\nNo recent news found for {st.session_state.current_ticker} in the last 7 days.\n"
                 
-                # Build the enhanced AI prompt
-                ai_prompt = f"""
+                # ============================================================
+# NEW: Build events context for AI
+# ============================================================
+events_context = ""
+economic_events = get_economic_events(days_ahead=10)
+if economic_events:
+    events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
+    for event in economic_events[:5]:  # Top 5 events
+        days_until = event.get('days_until', 0)
+        impact = event.get('impact', 'Low')
+        event_name = event.get('event', 'Unknown')
+        events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
+
+# Add earnings event
+earnings_event = get_upcoming_earnings(st.session_state.current_ticker, days_ahead=10)
+if earnings_event:
+    days_until = earnings_event.get('days_until', 0)
+    events_context += f"- EARNINGS for {st.session_state.current_ticker}: {days_until} days away (HIGH impact)\n"
+
+# Build the enhanced AI prompt
+ai_prompt = f"""
 You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {st.session_state.current_ticker}, provide a concise trading insight.
 
 TICKER: {st.session_state.current_ticker}
@@ -2465,10 +2794,11 @@ Provide a 3-4 sentence insight that:
 1. Acknowledges the macro environment and how it affects this trade
 2. Mentions the sector context and any relevant sector trends
 3. INCORPORATES ANY RECENT STOCK-SPECIFIC NEWS OR CATALYSTS (this is critical!)
-4. Explains the key reason for the recommendation
-5. Gives a clear, actionable takeaway
+4. INCORPORATES UPCOMING ECONOMIC EVENTS AND HOW THEY MIGHT IMPACT THIS STOCK
+5. Explains the key reason for the recommendation
+6. Gives a clear, actionable takeaway
 
-Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, and this specific stock.
+Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, upcoming events, and this specific stock.
 """
                 
                 try:
@@ -3278,8 +3608,27 @@ MACRO CONTEXT:
             else:
                 stock_news_context = f"\nNo recent news found for {ticker} in the last 7 days.\n"
             
-            # Build the comprehensive AI prompt (same as Dashboard)
-            ai_prompt = f"""
+            # ============================================================
+# NEW: Build events context for AI (in AI Research tab)
+# ============================================================
+events_context = ""
+economic_events = get_economic_events(days_ahead=10)
+if economic_events:
+    events_context = "UPCOMING ECONOMIC EVENTS (Next 10 Days):\n"
+    for event in economic_events[:5]:  # Top 5 events
+        days_until = event.get('days_until', 0)
+        impact = event.get('impact', 'Low')
+        event_name = event.get('event', 'Unknown')
+        events_context += f"- {event_name}: {days_until} days away ({impact} impact)\n"
+
+# Add earnings event
+earnings_event = get_upcoming_earnings(ticker, days_ahead=10)
+if earnings_event:
+    days_until = earnings_event.get('days_until', 0)
+    events_context += f"- EARNINGS for {ticker}: {days_until} days away (HIGH impact)\n"
+
+# Build the comprehensive AI prompt
+ai_prompt = f"""
 You are a professional options trader and quantitative analyst. Based on the following comprehensive data for {ticker}, provide a concise trading insight.
 
 TICKER: {ticker}
@@ -3306,6 +3655,7 @@ SENTIMENT METRICS:
 {macro_context}
 {sector_performance}
 {stock_news_context}
+{events_context}
 
 MY RECOMMENDATION: {decision['recommendation']}
 - Confidence: {decision['confidence']}%
@@ -3318,10 +3668,11 @@ Provide a 3-4 sentence insight that:
 1. Acknowledges the macro environment and how it affects this trade
 2. Mentions the sector context and any relevant sector trends
 3. INCORPORATES ANY RECENT STOCK-SPECIFIC NEWS OR CATALYSTS (this is critical!)
-4. Explains the key reason for the recommendation
-5. Gives a clear, actionable takeaway
+4. INCORPORATES UPCOMING ECONOMIC EVENTS AND HOW THEY MIGHT IMPACT THIS STOCK
+5. Explains the key reason for the recommendation
+6. Gives a clear, actionable takeaway
 
-Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, and this specific stock.
+Keep it professional, concise, and actionable. Focus on the intersection of macro trends, sector performance, stock catalysts, upcoming events, and this specific stock.
 """
             
             try:
