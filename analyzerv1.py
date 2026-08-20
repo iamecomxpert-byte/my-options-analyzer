@@ -1115,33 +1115,48 @@ def get_pullback_entry_recommendation(current_price, hist_data, max_pain, rsi, s
 # ========================
 # GROQ RETRY LOGIC
 # ========================
-def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are a financial analyst specializing in stock market news summarization."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.3-70b-versatile",
-                max_tokens=600,
-                temperature=0.3,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt)
-                    st.warning(f"⏳ Groq rate limit hit. Waiting {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
+def call_groq_with_retry(client, prompt, max_retries=2, base_delay=2):
+    # Try multiple models in order of preference
+    models_to_try = [
+        "openai/gpt-oss-120b",    # Best quality
+        "qwen/qwen3.6-27b",       # Good alternative
+        "groq/compound",          # Groq's own
+        "openai/gpt-oss-20b",     # Faster but lower quality
+    ]
+    
+    for model in models_to_try:
+        for attempt in range(max_retries):
+            try:
+                response = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are a financial analyst specializing in stock market news summarization."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    model=model,
+                    max_tokens=600,
+                    temperature=0.3,
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "404" in error_str or "model" in error_str.lower():
+                    st.warning(f"⚠️ Model {model} not available, trying next...")
+                    break  # Try next model
+                elif "429" in error_str or "rate limit" in error_str.lower():
+                    if attempt < max_retries - 1:
+                        wait_time = base_delay * (2 ** attempt)
+                        st.warning(f"⏳ Rate limit on {model}. Waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        break  # Try next model
                 else:
-                    return None
-            else:
-                return None
+                    st.warning(f"⚠️ Error with {model}: {error_str[:100]}")
+                    break  # Try next model
+    
+    st.error("❌ All models failed. Please check your Groq API configuration.")
     return None
-
+    
 # --- AI RESEARCH WITH SENTIMENT ---
 def fetch_news_finnhub(ticker):
     api_key = st.secrets.get("FINNHUB_API_KEY")
