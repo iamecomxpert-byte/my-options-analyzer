@@ -1979,12 +1979,7 @@ def get_trading_recommendation(data):
     # ============================================================
     # NEW: Apply Event Impact Penalty/Adjustment
     # ============================================================
-    # High impact events in next 3 days = reduce bullish score
-    # Earnings in next 7 days = reduce bullish score significantly
-    # No events = slight bullish bias (normal conditions)
-    
     if high_impact_events_coming >= 2:
-        # Multiple high impact events - caution
         event_penalty = 1.5
         factor_details.append(f"⚠️ {high_impact_events_coming} high-impact events coming - REDUCE SIZE")
     elif high_impact_events_coming >= 1:
@@ -2000,6 +1995,20 @@ def get_trading_recommendation(data):
     
     # Apply event penalty to net score
     net_score = bullish_score - bearish_score - event_penalty
+    
+    # --- Determine Thresholds Based on Regime ---
+    if regime == "optimal":
+        buy_threshold = 1.5
+        strong_buy_threshold = 3.5
+    elif regime == "low_vol":
+        buy_threshold = 1.0
+        strong_buy_threshold = 3.0
+    elif regime == "elevated":
+        buy_threshold = 2.5
+        strong_buy_threshold = 4.5
+    else:  # high_vol
+        buy_threshold = 3.5
+        strong_buy_threshold = 5.5
     
     # ============================================================
     # Entry Zone Calculation (with event adjustment)
@@ -2019,7 +2028,7 @@ def get_trading_recommendation(data):
     
     # Event adjustment: If high impact events coming, wait for bigger pullback
     if high_impact_events_coming >= 1:
-        entry_zone_low = entry_zone_low * 0.97  # 3% lower entry
+        entry_zone_low = entry_zone_low * 0.97
         entry_zone_high = entry_zone_high * 0.98
     
     # ============================================================
@@ -2032,7 +2041,6 @@ def get_trading_recommendation(data):
     else:
         stop_pct = 0.08
     
-    # Wider stop for upcoming events
     if high_impact_events_coming >= 1:
         stop_pct += 0.03
     
@@ -2093,9 +2101,8 @@ def get_trading_recommendation(data):
     else:
         bollinger_boost = 1.0
     
-    # Event target adjustment: If high impact events, target can be bigger
     if high_impact_events_coming >= 1:
-        event_target_boost = 1.15  # 15% bigger moves expected
+        event_target_boost = 1.15
     else:
         event_target_boost = 1.0
     
@@ -2122,7 +2129,6 @@ def get_trading_recommendation(data):
         position_size = "Full (100%)"
         position_emoji = "🟢"
     
-    # Reduce position size for high impact events
     if high_impact_events_coming >= 2:
         position_size = "Quarter (25%) - HIGH EVENT RISK"
         position_emoji = "🔴"
@@ -2186,7 +2192,6 @@ def get_trading_recommendation(data):
             summary += " - wait for better entry"
         confidence = max(35, 45 + (net_score * 4))
     
-    # Additional context for events
     if high_impact_events_coming >= 1 and "BUY" in recommendation:
         summary += " - Scale in gradually (50% now, 50% after events)"
     
@@ -2209,13 +2214,11 @@ def get_trading_recommendation(data):
         'factor_details': factor_details,
         'strong_bullish': strong_bullish,
         'strong_bearish': strong_bearish,
-        # NEW: Event-related data
         'event_details': event_details,
         'high_impact_events': high_impact_events_coming,
         'earnings_event': earnings_event_details,
         'event_impact_score': event_impact_score
     }
-
 # ========================
 # MAIN CONTENT - REORDERED TABS (Step 6)
 # ========================
