@@ -1789,7 +1789,7 @@ def call_groq_with_retry(client, prompt, max_retries=3, base_delay=2):
                     {"role": "system", "content": "You are a financial analyst specializing in stock market news summarization."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 max_tokens=600,
                 temperature=0.3,
             )
